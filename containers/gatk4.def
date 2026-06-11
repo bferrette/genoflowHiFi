@@ -1,0 +1,310 @@
+Bootstrap: docker
+From: ubuntu:24.04
+
+%labels
+    Maintainer "Bruno Ferrette"
+    Description "Ubuntu 24.04 + GATK 4.6.2.0, Java 17, native Python 3.10.20 venv, R via apt, HTSlib/SAMtools/BCFtools/bedtools2, OpenMPI, GNU parallel. No BLAST."
+
+%help
+    GATK 4.6.2.0 container (Ubuntu 24.04):
+      - Java 17; R via apt w/ data.table, dplyr, ggplot2 (+ getopt, gplots, optparse, backports)
+      - Python 3.10.20 compiled + venv; latest wheels: numpy, scipy, torch (CPU), pymc, keras, scikit-learn, matplotlib, pandas, biopython, PyVCF3 (module 'vcf'), pysam
+      - HTSlib/SAMtools/BCFtools/bedtools2 built from source
+      - OpenMPI and GNU parallel
+      - No Conda. No BLAST.
+
+%environment
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+    export GATK_HOME=/opt/gatk
+    export PATH=/opt/gatk-venv/bin:/opt/bedtools2/bin:${GATK_HOME}:/usr/local/bin:${PATH}
+    export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH}
+    export KERAS_BACKEND=torch
+    export MPLCONFIGDIR=/tmp/matplotlib
+    # If ever running MPI as root (not recommended), uncomment:
+    # export OMPI_ALLOW_RUN_AS_ROOT=1
+    # export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+
+    # Robust downloader: atomic .part output, resume, stalled-transfer detection, curl -> wget fallback.
+    fetch() {
+      url="$1"
+      out="$2"
+
+      if [ -z "${url}" ] || [ -z "${out}" ]; then
+        echo "[ERROR] fetch requires URL and output path" >&2
+        return 2
+      fi
+
+      outdir="$(dirname "${out}")"
+      mkdir -p "${outdir}"
+
+      tmp="${out}.part"
+
+      # Remove invalid empty partial files, but preserve non-empty partials for resume.
+      if [ -e "${tmp}" ] && [ ! -s "${tmp}" ]; then
+        rm -f "${tmp}"
+      fi
+
+      echo "[INFO] Downloading: ${url}" >&2
+      echo "[INFO] Output     : ${out}" >&2
+
+      # curl first: resume support, retries, timeout, low-speed protection, HTTP/1.1.
+      if curl \
+          --fail \
+          --location \
+          --continue-at - \
+          --retry 10 \
+          --retry-all-errors \
+          --retry-delay 5 \
+          --connect-timeout 30 \
+          --max-time 0 \
+          --speed-time 60 \
+          --speed-limit 1024 \
+          --http1.1 \
+          --output "${tmp}" \
+          "${url}"
+      then
+        if [ ! -s "${tmp}" ]; then
+          echo "[ERROR] Download produced an empty file: ${tmp}" >&2
+          return 1
+        fi
+        mv -f "${tmp}" "${out}"
+        return 0
+      fi
+
+      echo "[WARN] curl failed; retrying with wget" >&2
+
+      # wget fallback: continue partial downloads and retry transient failures.
+      if wget \
+          --continue \
+          --tries=5 \
+          --timeout=30 \
+          --waitretry=5 \
+          --retry-connrefused \
+          --output-document="${tmp}" \
+          "${url}"
+      then
+        if [ ! -s "${tmp}" ]; then
+          echo "[ERROR] Download produced an empty file: ${tmp}" >&2
+          return 1
+        fi
+        mv -f "${tmp}" "${out}"
+        return 0
+      fi
+
+      echo "[ERROR] Failed to download: ${url}" >&2
+      rm -f "${tmp}"
+      return 1
+    }
+
+    # Optional checksum wrapper. Use only when a trusted SHA256 is available upstream.
+    fetch_with_sha256() {
+      url="$1"
+      out="$2"
+      expected_sha256="$3"
+
+      if [ -z "${expected_sha256}" ]; then
+        echo "[ERROR] fetch_with_sha256 requires an expected SHA256" >&2
+        return 2
+      fi
+
+      fetch "${url}" "${out}"
+
+      actual_sha256="$(sha256sum "${out}" | awk '{print $1}')"
+      if [ "${actual_sha256}" != "${expected_sha256}" ]; then
+        echo "[ERROR] SHA256 mismatch for ${out}" >&2
+        echo "[ERROR] Expected: ${expected_sha256}" >&2
+        echo "[ERROR] Observed : ${actual_sha256}" >&2
+        rm -f "${out}"
+        return 1
+      fi
+
+      echo "[INFO] SHA256 verified: ${out}" >&2
+    }
+
+    # --- Base OS & essentials + R stack ---
+    apt-get update
+    apt-get install -y --no-install-recommends \
+      ca-certificates curl wget unzip git git-lfs make cmake build-essential \
+      xz-utils bzip2 gzip pigz tar \
+      zlib1g-dev libbz2-dev liblzma-dev libdeflate-dev \
+      libcurl4-openssl-dev libssl-dev \
+      libncurses5-dev libncursesw5-dev libreadline-dev \
+      autoconf automake libtool pkg-config gnupg dirmngr \
+      openjdk-17-jre-headless \
+      libgomp1 libgfortran5 \
+      openmpi-bin libopenmpi-dev \
+      parallel moreutils \
+      r-base r-base-dev r-recommended \
+      r-cran-data.table r-cran-dplyr r-cran-ggplot2 \
+      r-cran-getopt r-cran-gplots r-cran-optparse r-cran-backports \
+      libcairo2-dev libxt-dev \
+      libsqlite3-dev tk-dev uuid-dev libgdbm-dev
+    apt-get upgrade -y
+    rm -rf /var/lib/apt/lists/*
+
+    # --- R package from source: gsalib 2.2.1 ---
+    mkdir -p /opt/build && cd /opt/build
+    fetch "https://github.com/broadinstitute/gsalib/archive/refs/tags/2.2.1.tar.gz" "gsalib-2.2.1.tar.gz"
+    tar -xzf gsalib-2.2.1.tar.gz
+    R CMD INSTALL "gsalib-2.2.1"
+    Rscript -e 'cat("gsalib=", as.character(packageVersion("gsalib")), "\n")'
+
+    # --- Python 3.10.20 (native, compiled from source) ---
+    mkdir -p /opt/build && cd /opt/build
+    PY_V=3.10.20
+    fetch "https://www.python.org/ftp/python/${PY_V}/Python-${PY_V}.tgz" "Python-${PY_V}.tgz"
+    tar -xzf "Python-${PY_V}.tgz"
+    cd "Python-${PY_V}"
+    ./configure --prefix=/opt/python-${PY_V} --enable-optimizations --with-ensurepip=install
+    make -j"$(nproc)"
+    make install
+    ln -sf /opt/python-${PY_V}/bin/python3 /usr/local/bin/python3.10
+    ln -sf /opt/python-${PY_V}/bin/pip3     /usr/local/bin/pip3.10
+
+    # --- venv + Python packages (latest wheels; CPU builds for DL libs) ---
+    /opt/python-${PY_V}/bin/python3 -m venv /opt/gatk-venv
+    /opt/gatk-venv/bin/python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+
+    # Core scientific + bio stack (PyVCF3 is the maintained fork; import module name is 'vcf')
+    /opt/gatk-venv/bin/pip install --no-cache-dir \
+      numpy scipy scikit-learn matplotlib pandas biopython PyVCF3 pysam --upgrade
+
+    # ML / ProbProg (CPU-only to keep image portable)
+    /opt/gatk-venv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch --upgrade
+    /opt/gatk-venv/bin/pip install --no-cache-dir keras --upgrade
+    /opt/gatk-venv/bin/pip install --no-cache-dir pymc --upgrade
+
+    # --- GATK 4.6.2.0 (release bundle) ---
+    mkdir -p /opt && cd /opt
+    GATK_URL="https://github.com/broadinstitute/gatk/releases/download/4.6.2.0/gatk-4.6.2.0.zip"
+    fetch "$GATK_URL" gatk.zip
+    unzip gatk.zip && rm -f gatk.zip
+    mv gatk-4.6.2.0 gatk
+    ln -sf /opt/gatk/gatk /usr/local/bin/gatk
+
+    # --- Genomics toolchain from source (override via build args if desired) ---
+    cd /opt/build
+    HTSLIB_VERSION=${HTSLIB_VERSION:-1.23.1}
+    SAMTOOLS_VERSION=${SAMTOOLS_VERSION:-1.23.1}
+    BCFTOOLS_VERSION=${BCFTOOLS_VERSION:-1.23.1}
+
+    # HTSlib
+    HTS_TARBALL="htslib-${HTSLIB_VERSION}.tar.bz2"
+    HTS_URL="https://github.com/samtools/htslib/releases/download/${HTSLIB_VERSION}/${HTS_TARBALL}"
+    fetch "$HTS_URL" "$HTS_TARBALL"
+    tar -xjf "$HTS_TARBALL"
+    cd "htslib-${HTSLIB_VERSION}"
+    ./configure --enable-libcurl --enable-plugins
+    make -j"$(nproc)"
+    make install
+    ldconfig || true
+    cd /opt/build && rm -rf "htslib-${HTSLIB_VERSION}" "$HTS_TARBALL"
+
+    # SAMtools
+    SAM_TARBALL="samtools-${SAMTOOLS_VERSION}.tar.bz2"
+    SAM_URL="https://github.com/samtools/samtools/releases/download/${SAMTOOLS_VERSION}/${SAM_TARBALL}"
+    fetch "$SAM_URL" "$SAM_TARBALL"
+    tar -xjf "$SAM_TARBALL"
+    cd "samtools-${SAMTOOLS_VERSION}"
+    ./configure --with-htslib=/usr/local --with-curses
+    make -j"$(nproc)"
+    make install
+    cd /opt/build && rm -rf "samtools-${SAMTOOLS_VERSION}" "$SAM_TARBALL"
+
+    # BCFtools
+    BCF_TARBALL="bcftools-${BCFTOOLS_VERSION}.tar.bz2"
+    BCF_URL="https://github.com/samtools/bcftools/releases/download/${BCFTOOLS_VERSION}/${BCF_TARBALL}"
+    fetch "$BCF_URL" "$BCF_TARBALL"
+    tar -xjf "$BCF_TARBALL"
+    cd "bcftools-${BCFTOOLS_VERSION}"
+    ./configure --with-htslib=/usr/local
+    make -j"$(nproc)"
+    make install
+    cd /opt/build && rm -rf "bcftools-${BCFTOOLS_VERSION}" "$BCF_TARBALL"
+
+    # bedtools2 (with retry hardening)
+    git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=30 \
+        clone --depth 1 https://github.com/arq5x/bedtools2.git /opt/bedtools2 \
+      || { sleep 5; git clone --depth 1 https://github.com/arq5x/bedtools2.git /opt/bedtools2; }
+    make -C /opt/bedtools2 -j"$(nproc)"
+    ln -sf /opt/bedtools2/bin/* /usr/local/bin/
+
+    # Cleanup
+    rm -rf /opt/build
+
+    # --- OPTIONAL: build GATK from source inside the image (commented) ---
+    # This bloats the image; only enable if you need to patch GATK.
+    # mkdir -p /opt/src && cd /opt/src
+    # git clone https://github.com/broadinstitute/gatk.git
+    # cd gatk
+    # git lfs install
+    # git lfs pull --include "src/main/resources/large"
+    # ./gradlew -Dorg.gradle.daemon=false bundle
+    # mkdir -p /opt/gatk-built && cd /opt/gatk-built
+    # unzip /opt/src/gatk/build/gatk-*.zip
+    # ln -sf /opt/gatk-built/gatk /usr/local/bin/gatk-built
+
+%test
+    set -eux
+
+    # Make all home/cache/data writes go to /tmp for build-time tests.
+    export HOME=/tmp
+    export XDG_CACHE_HOME=/tmp/xdg-cache
+    export XDG_CONFIG_HOME=/tmp/xdg-config
+    export XDG_DATA_HOME=/tmp/xdg-data
+    export ARVIZ_DATA=/tmp/arviz_data
+    export MPLCONFIGDIR=/tmp/matplotlib
+    export KERAS_BACKEND=torch
+
+    mkdir -p \
+      /tmp/matplotlib \
+      /tmp/arviz_data \
+      /tmp/xdg-cache \
+      /tmp/xdg-config \
+      /tmp/xdg-data
+
+    java -version
+    gatk --version
+
+    /opt/gatk-venv/bin/python -c "import sys; print(sys.version)"
+
+    /opt/gatk-venv/bin/python - <<'PY'
+import numpy
+import scipy
+import sklearn
+import matplotlib
+import pandas
+import pysam
+import torch
+import keras
+import pymc
+from Bio import SeqIO
+import vcf
+
+print("OK: PyVCF3 module 'vcf' loaded")
+print("OK: numpy", numpy.__version__)
+print("OK: scipy", scipy.__version__)
+print("OK: sklearn", sklearn.__version__)
+print("OK: matplotlib", matplotlib.__version__)
+print("OK: pandas", pandas.__version__)
+print("OK: pysam", pysam.__version__)
+print("OK: torch", torch.__version__)
+print("OK: keras", keras.__version__)
+print("OK: pymc", pymc.__version__)
+PY
+
+    samtools --version | head -n 1
+    bcftools --version | head -n 1
+    bedtools --version
+    parallel --version | head -n 1
+    mpirun --version | head -n 1
+    mpicc -show
+
+%runscript
+    exec gatk "$@"

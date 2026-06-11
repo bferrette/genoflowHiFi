@@ -1,0 +1,397 @@
+Bootstrap: docker
+From: ubuntu:24.04
+
+%labels
+  Maintainer Bruno Ferrette
+  Description RepeatMasker/RepeatModeler toolchain with extras (Ubuntu 24.04, PEP-668 venv)
+  Source Hybrid: tarballs (HMMER, RepeatMasker, RMBlast, RECON, RepeatModeler, RepeatScout,
+  LTR_retriever, RepeatAfterMe, NINJA), git (TRF, cd-hit)
+  Note Bind external Dfam/RepBase libs at runtime: -B /data/rm_libs/Libraries:/opt/RepeatMasker/Libraries
+
+%environment
+  export LANG=en_US.UTF-8
+  export LANGUAGE=en_US:en
+  export LC_ALL=en_US.UTF-8
+  export REPEATMODELER_DIR=/opt/RepeatModeler
+  export BLAST_USAGE_REPORT=false
+  # Keep host Perl out; force container-only libs
+  unset PERL5LIB PERL_LOCAL_LIB_ROOT PERL_MB_OPT PERL_MM_OPT PERL5OPT
+  export PERL5LIB=/opt/RepeatMasker:/opt/RepeatMasker/Libraries
+  # Toolchain PATHs (ordered to avoid surprises)
+  export PATH=/opt/venv/bin:$PATH
+  export PATH=/opt/RepeatMasker:/opt/RepeatMasker/util:$PATH
+  export PATH=/opt/RepeatModeler:/opt/RepeatModeler/util:$PATH
+  export PATH=/opt/ucsc_tools:$PATH
+  export PATH=/opt/hmmer/bin:$PATH
+  export PATH=/opt/genometools/bin:$PATH
+  export PATH=/opt/trf/bin:$PATH
+  export PATH=/opt/cd-hit/bin:$PATH
+  export PATH=/opt/NINJA:$PATH
+  export PATH=/opt/RepeatAfterMe/bin:$PATH
+  export PATH=/opt/RepeatScout:$PATH
+  export PATH=/opt/RECON/bin:$PATH
+  export PATH=/opt/rmblast/bin:$PATH
+
+%post
+#!/bin/bash -euxo pipefail
+export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC
+
+apt update && apt -y upgrade
+apt install -y --no-install-recommends \
+  ca-certificates curl wget git unzip bzip2 xz-utils \
+  gawk coreutils build-essential pkg-config autoconf automake libtool \
+  libbz2-dev zlib1g-dev liblzma-dev libcurl4-openssl-dev \
+  libncursesw5-dev libc6-dev locales \
+  python3 python3-dev python-is-python3 python3-pip python3-venv python3-h5py \
+  libgomp1 perl libfile-which-perl libtext-soundex-perl \
+  libjson-perl liburi-perl libwww-perl libdevel-size-perl \
+  libdbd-sqlite3-perl sqlite3 procps
+rm -rf /var/lib/apt/lists/*
+
+# Locale
+sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen || true
+locale-gen en_US.UTF-8 || true
+update-ca-certificates || true
+
+# Python venv (PEP 668); install stack via pip
+VENV=/opt/venv
+python3 -m venv "$VENV"
+"$VENV/bin/python" -m pip install --no-cache-dir --upgrade pip setuptools wheel
+"$VENV/bin/pip" install --no-cache-dir h5py --upgrade
+ln -sf "$VENV/bin/python" /usr/local/bin/python
+ln -sf "$VENV/bin/python" /usr/local/bin/python3
+ln -sf "$VENV/bin/pip"    /usr/local/bin/pip
+
+mkdir -p /opt/build && cd /opt/build
+
+# ===== HMMER 3.4 =====
+curl -fSL http://eddylab.org/software/hmmer/hmmer.tar.gz -o hmmer.tar.gz
+tar -xzf hmmer.tar.gz
+cd hmmer-3.4
+./configure --prefix=/opt/hmmer
+make -j"$(nproc)"
+make check || true
+make install
+make -C easel install prefix=/opt/hmmer
+cd /opt/build && rm -rf hmmer-3.4 hmmer.tar.gz
+
+# ===== TRF =====
+git clone --depth 1 https://github.com/Benson-Genomics-Lab/TRF.git /opt/trf-src
+cd /opt/trf-src && mkdir -p build && cd build
+../configure --prefix=/opt/trf
+make -j"$(nproc)"
+make install
+ln -sf /opt/trf/bin/trf /opt/trf/trf
+cd /opt/build && rm -rf /opt/trf-src
+
+# ===== RepeatScout 1.0.7 =====
+RSCOUT_VER=1.0.7
+RSCOUT_URL="https://github.com/Dfam-consortium/RepeatScout/archive/refs/tags/v${RSCOUT_VER}.tar.gz"
+curl -fSL "$RSCOUT_URL" -o RepeatScout.tar.gz
+tar -xzf RepeatScout.tar.gz
+cd "RepeatScout-${RSCOUT_VER}"
+make -j"$(nproc)"
+install -d /opt/RepeatScout
+for f in RepeatScout build_lmer_table filter-stage-1.prl filter-stage-2.prl; do
+  if [ -f "$f" ]; then install -m 0755 "$f" /opt/RepeatScout/; fi
+done
+if [ -f LICENSE ]; then install -m 0644 LICENSE /opt/RepeatScout/; fi
+cd /opt/build && rm -rf "RepeatScout-${RSCOUT_VER}" RepeatScout.tar.gz
+
+# ===== NCBI BLAST+ 2.17.0 (dustmasker only to PATH) =====
+curl -fSL "https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/2.17.0/ncbi-blast-2.17.0+-x64-linux.tar.gz" -o ncbi-blast.tgz
+tar -xzf ncbi-blast.tgz -C /opt && rm -f ncbi-blast.tgz
+ln -sfn /opt/ncbi-blast-2.17.0+ /opt/ncbi-blast
+ln -sf /opt/ncbi-blast/bin/dustmasker /usr/local/bin/dustmasker
+
+# ===== RECON 1.08 =====
+cd /opt
+curl -fSL http://www.repeatmasker.org/RECON-1.08.tar.gz -o RECON-1.08.tar.gz
+tar -xzf RECON-1.08.tar.gz && rm -f RECON-1.08.tar.gz
+mv RECON-1.08 RECON
+make -C /opt/RECON/src -j"$(nproc)"
+make -C /opt/RECON/src install
+cd /opt/RECON && mkdir -p /opt/RECON/bin
+find /opt/RECON/src -maxdepth 1 -type f -perm -111 -exec cp -f {} /opt/RECON/bin/ \; || true
+if [ -f 00README ]; then cp -f 00README /opt/RECON/bin/; fi
+sed -i 's#^\$path =.*#$path = "/opt/RECON/bin";#' /opt/RECON/scripts/recon.pl
+
+# ===== cd-hit 4.8.1 (+ aux) =====
+cd /opt/build
+git clone --depth 1 --branch V4.8.1 https://github.com/weizhongli/cdhit.git cd-hit-src
+cd cd-hit-src && make -j"$(nproc)"
+install -d /opt/cd-hit/bin
+make install PREFIX=/opt/cd-hit || true
+for f in cd-hit cd-hit-2d cd-hit-est cd-hit-est-2d cd-hit-454 clstr2tree clstr_list_sort clstr_merge cd-hit-div cd-hit-lap cd-hit-para; do
+  if [ -f "$f" ]; then install -m 0755 "$f" /opt/cd-hit/bin/; fi
+done
+cd cd-hit-auxtools && make -j"$(nproc)"
+find . -maxdepth 1 -type f -perm -111 -exec install -m 0755 {} /opt/cd-hit/bin/ \; || true
+find . -maxdepth 1 -type f -name "*.pl" -exec install -m 0755 {} /opt/cd-hit/bin/ \; || true
+cd /opt/build && rm -rf /opt/build/cd-hit-src
+
+# ===== GenomeTools / LTRharvest v1.6.5 =====
+cd /opt/build && curl -fSL https://github.com/genometools/genometools/archive/refs/tags/v1.6.5.tar.gz -o genometools.tar.gz
+tar -xzf genometools.tar.gz && cd genometools-1.6.5
+make -j"$(nproc)" threads=yes cairo=no
+make threads=yes cairo=no prefix=/opt/genometools install
+make cleanup || true
+cd /opt/build
+/opt/genometools/bin/gt -version || { echo "[ERR] genometools not runnable"; exit 1; }
+ln -sf /opt/genometools/bin/gt /usr/local/bin/gt
+rm -rf genometools-1.6.5 genometools.tar.gz
+
+# ===== LTR_retriever v2.9.0 =====
+curl -fSL "https://github.com/oushujun/LTR_retriever/archive/refs/tags/v2.9.0.tar.gz" -o LTR_retriever.tar.gz
+tar -xzf LTR_retriever.tar.gz && rm -f LTR_retriever.tar.gz
+mv LTR_retriever-2.9.0 /opt/LTR_retriever
+sed -i \
+  -e 's#BLAST+=#BLAST+=/opt/rmblast/bin#' \
+  -e 's#RepeatMasker=#RepeatMasker=/opt/RepeatMasker#' \
+  -e 's#HMMER=#HMMER=/opt/hmmer/bin#' \
+  -e 's#CDHIT=#CDHIT=/opt/cd-hit/bin#' \
+  /opt/LTR_retriever/paths
+
+# ===== MAFFT 7.526-1 (.deb) =====
+curl -fSL "https://mafft.cbrc.jp/alignment/software/mafft_7.526-1_amd64.deb" -o mafft_7.526-1_amd64.deb
+dpkg -i mafft_7.526-1_amd64.deb || { apt update && apt -y -f install; }
+rm -f mafft_7.526-1_amd64.deb
+rm -rf /var/lib/apt/lists/*
+
+# ===== NINJA 1.00-cluster_only =====
+cd /opt/build
+curl -fSL "https://github.com/TravisWheelerLab/NINJA/archive/refs/tags/1.00-cluster_only.tar.gz" -o NINJA.tar.gz
+tar -xzf NINJA.tar.gz
+cd NINJA-1.00-cluster_only/NINJA
+make clean || true
+make -j"$(nproc)"
+install -d /opt/NINJA
+BIN_NAME=NINJA; if [ -f Ninja ]; then BIN_NAME=Ninja; fi
+install -m 0755 "$BIN_NAME" /opt/NINJA/
+cd /opt/build && rm -rf NINJA-1.00-cluster_only NINJA.tar.gz
+
+# ===== UCSC tools (prebuilt) =====
+mkdir -p /opt/ucsc_tools
+curl -fSL https://hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/faToTwoBit  -o /opt/ucsc_tools/faToTwoBit
+curl -fSL https://hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/twoBitInfo  -o /opt/ucsc_tools/twoBitInfo
+curl -fSL https://hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/twoBitToFa  -o /opt/ucsc_tools/twoBitToFa
+chmod 0755 /opt/ucsc_tools/faToTwoBit /opt/ucsc_tools/twoBitInfo /opt/ucsc_tools/twoBitToFa
+ln -sf /opt/ucsc_tools/faToTwoBit /usr/local/bin/faToTwoBit
+ln -sf /opt/ucsc_tools/twoBitInfo /usr/local/bin/twoBitInfo
+ln -sf /opt/ucsc_tools/twoBitToFa /usr/local/bin/twoBitToFa
+
+# ===== RMBlast 2.14.1+ =====
+cd /opt/build
+mkdir -p /opt/rmblast
+curl -fSL "https://www.repeatmasker.org/rmblast/rmblast-2.14.1+-x64-linux.tar.gz" -o rmblast.tgz
+tar --strip-components=1 -xzf rmblast.tgz -C /opt/rmblast
+rm -f rmblast.tgz
+
+# ===== RepeatMasker 4.2.3 =====
+cd /opt/build
+curl -fSL "https://www.repeatmasker.org/RepeatMasker/RepeatMasker-4.2.3.tar.gz" -o RepeatMasker-4.2.3.tar.gz
+tar -xzf RepeatMasker-4.2.3.tar.gz -C /opt && rm -f RepeatMasker-4.2.3.tar.gz
+cd /opt/RepeatMasker
+mkdir -p Libraries/famdb
+chmod -R a+w Libraries Libraries/famdb || true
+# Ensure BOTH system and venv Pythons can import h5py; prefer venv
+export PATH=/opt/venv/bin:$PATH
+
+echo "[DEBUG] Verifying h5py in both Pythons ..."
+for PY in /opt/venv/bin/python3 /usr/bin/python3; do
+  if [ -x "$PY" ]; then
+    if ! "$PY" - <<'PY'
+import h5py, sys
+print("OK:", sys.executable, h5py.__version__)
+PY
+    then
+      # If the system Python lacks h5py, try apt, then pip as a fallback
+      if [ "$PY" = "/usr/bin/python3" ]; then
+        apt-get update && apt-get install -y --no-install-recommends python3-h5py || true
+      fi
+      "$PY" -m pip install --no-cache-dir --break-system-packages h5py || true
+      "$PY" - <<'PY'
+import h5py, sys
+print("OK(after-fix):", sys.executable, h5py.__version__)
+PY
+    fi
+  fi
+done
+
+perl configure \
+  -hmmer_dir=/opt/hmmer/bin \
+  -rmblast_dir=/opt/rmblast/bin \
+  -libdir=/opt/RepeatMasker/Libraries \
+  -trf_prgm=/opt/trf/bin/trf \
+  -default_search_engine=rmblast
+# Stash pristine base libs inside SIF for export
+cp -a /opt/RepeatMasker/Libraries /opt/RepeatMasker/Libraries.internal
+# Make the module available in both expected locations
+if [ -f /opt/RepeatMasker/Libraries/RepeatAnnotationData.pm ]; then
+  cp -f /opt/RepeatMasker/Libraries/RepeatAnnotationData.pm /opt/RepeatMasker/RepeatAnnotationData.pm || true
+fi
+
+# ===== RepeatAfterMe v0.0.7 (build/install; bake-in compat symlinks) =====
+cd /opt/build
+curl -fSL "https://github.com/Dfam-consortium/RepeatAfterMe/archive/refs/tags/RepeatAfterMe_V0.0.7.tar.gz" -o RepeatAfterMe.tgz
+tar -xzf RepeatAfterMe.tgz && rm -f RepeatAfterMe.tgz
+RAM_SRC_DIR="$(find . -maxdepth 1 -type d -name 'RepeatAfterMe-RepeatAfterMe_V0.0.7' -print -quit)"
+cd "$RAM_SRC_DIR"
+make -j"$(nproc)"
+make INSTDIR=/opt/RepeatAfterMe install
+install -d /opt/RepeatAfterMe/util
+for u in util/extend-stk.pl util/calcPaths.pl util/davidExtendConsRAM.pl; do
+  [ -f "$u" ] && install -m 0755 "$u" /opt/RepeatAfterMe/util/ || true
+done
+# PATH and compatibility symlinks created at build-time (SIF is read-only at runtime)
+if [ -x /opt/RepeatAfterMe/bin/RAMExtend ]; then
+  ln -sf /opt/RepeatAfterMe/bin/RAMExtend /usr/local/bin/RAMExtend
+  ln -sf /opt/RepeatAfterMe/bin/RAMExtend /opt/RepeatAfterMe/RAMExtend
+else
+  echo "[ERR] RAMExtend missing after install" >&2; exit 13
+fi
+
+# ===== RepeatModeler 2.0.8 =====
+cd /opt/build
+curl -fSL "https://github.com/Dfam-consortium/RepeatModeler/archive/refs/tags/2.0.8.tar.gz" -o RepeatModeler-2.0.8.tar.gz
+tar -xzf RepeatModeler-2.0.8.tar.gz && rm -f RepeatModeler-2.0.8.tar.gz
+mv RepeatModeler-2.0.8 /opt/RepeatModeler
+cd /opt/RepeatModeler
+perl configure \
+  -cdhit_dir=/opt/cd-hit/bin \
+  -genometools_dir=/opt/genometools/bin \
+  -ltr_retriever_dir=/opt/LTR_retriever \
+  -mafft_dir=/usr/bin \
+  -ninja_dir=/opt/NINJA \
+  -recon_dir=/opt/RECON/bin \
+  -repeatmasker_dir=/opt/RepeatMasker \
+  -rmblast_dir=/opt/rmblast/bin \
+  -rscout_dir=/opt/RepeatScout \
+  -trf_dir=/opt/trf/bin \
+  -ucsctools_dir=/opt/ucsc_tools \
+  -repeatafterme_dir=/opt/RepeatAfterMe
+
+# Patch RepeatModeler 2.0.8 for RECON 1.08 compatibility.
+# The installed RECON 1.08 still needs the old imagespread → eledef workflow.
+# RepeatModeler 2.0.8 calls runRECON(), which is intended for newer RECON behavior.
+#
+# This patch only changes the main executable call near the workflow body.
+# It does not modify the sub runRECON or sub runRECONOLD definitions.
+
+echo "[INFO] Patching RepeatModeler runRECON() call for RECON 1.08 compatibility"
+
+echo "[INFO] Before patch:"
+grep -n "runRECON" /opt/RepeatModeler/RepeatModeler | head -n 20
+
+python3 - <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path("/opt/RepeatModeler/RepeatModeler")
+text = path.read_text()
+
+# Patch only the first executable call to runRECON(), not the subroutine definitions.
+# This captures the whole argument block until the closing ');'.
+pattern = re.compile(
+    r'runRECON\s*\(\s*workDir\s*=>\s*\$roundTmpDir\s*,.*?\);\s*',
+    re.DOTALL
+)
+
+replacement = (
+    "runRECONOLD( workDir => $roundTmpDir,\n"
+    "             reconPath => $RECON_DIR );\n"
+)
+
+new_text, n = pattern.subn(replacement, text, count=1)
+
+if n != 1:
+    sys.stderr.write("[ERR] Failed to patch the main runRECON() call.\\n")
+    sys.stderr.write("[ERR] Context around runRECON occurrences:\\n")
+    for m in re.finditer(r'runRECON', text):
+        start = max(0, m.start() - 200)
+        end = min(len(text), m.end() + 400)
+        sys.stderr.write(text[start:end] + "\\n---\\n")
+    sys.exit(14)
+
+path.write_text(new_text)
+PY
+
+echo "[INFO] After patch:"
+grep -n "runRECON" /opt/RepeatModeler/RepeatModeler | head -n 20
+
+grep -q "runRECONOLD( workDir => \$roundTmpDir" /opt/RepeatModeler/RepeatModeler || {
+  echo "[ERR] RepeatModeler RECON 1.08 compatibility patch failed" >&2
+  exit 14
+}
+
+echo "[OK] Patched RepeatModeler runRECON() -> runRECONOLD() for RECON 1.08"
+
+# ----- Helper: copy in-image base Libraries to a bound external dir (exclude famdb) -----
+cat >/usr/local/bin/rm_copy_base_libs.sh <<'EOSH'
+#!/usr/bin/env bash
+set -euo pipefail
+SRC="/opt/RepeatMasker/Libraries.internal"
+DST="/opt/RepeatMasker/Libraries"
+if [ ! -d "$SRC" ]; then
+  echo "[ERR] Source $SRC not found in image" >&2
+  exit 2
+fi
+mkdir -p "$DST"
+# copy everything except the famdb directory
+( cd "$SRC" && tar --exclude='./famdb' -cf - . ) | ( cd "$DST" && tar -xpf - )
+echo "[OK] Copied base RepeatMasker Libraries (excluding famdb) to $DST"
+EOSH
+chmod 0755 /usr/local/bin/rm_copy_base_libs.sh
+
+# ---- Global symlinks ----
+install -d /usr/local/bin
+ln -sf /opt/RepeatMasker/RepeatMasker   /usr/local/bin/RepeatMasker
+ln -sf /opt/RepeatModeler/RepeatModeler /usr/local/bin/RepeatModeler
+ln -sf /opt/RepeatModeler/BuildDatabase /usr/local/bin/BuildDatabase
+ln -sf /opt/genometools/bin/gt          /usr/local/bin/gt
+ln -sf /opt/trf/bin/trf                 /usr/local/bin/trf
+for f in /opt/hmmer/bin/*; do ln -sf "$f" /usr/local/bin/"$(basename "$f")"; done
+for f in /opt/rmblast/bin/*; do ln -sf "$f" /usr/local/bin/"$(basename "$f")"; done
+for f in /opt/ucsc_tools/*; do ln -sf "$f" /usr/local/bin/"$(basename "$f")"; done
+for f in cd-hit cd-hit-est cd-hit-2d cd-hit-est-2d cd-hit-454 clstr2tree clstr_list_sort clstr_merge; do
+  [ -x "/opt/cd-hit/bin/$f" ] && ln -sf "/opt/cd-hit/bin/$f" "/usr/local/bin/$f" || true
+done
+if [ -x /opt/NINJA/NINJA ]; then
+  ln -sf /opt/NINJA/NINJA /usr/local/bin/NINJA
+  ln -sf /opt/NINJA/NINJA /usr/local/bin/Ninja
+elif [ -x /opt/NINJA/Ninja ]; then
+  ln -sf /opt/NINJA/Ninja /usr/local/bin/Ninja
+  ln -sf /opt/NINJA/Ninja /usr/local/bin/NINJA
+fi
+[ -x /opt/RepeatAfterMe/bin/RAMExtend ] && ln -sf /opt/RepeatAfterMe/bin/RAMExtend /usr/local/bin/RAMExtend || true
+[ -x /opt/RepeatScout/RepeatScout ] && ln -sf /opt/RepeatScout/RepeatScout /usr/local/bin/RepeatScout || true
+[ -x /opt/RepeatScout/build_lmer_table ] && ln -sf /opt/RepeatScout/build_lmer_table /usr/local/bin/build_lmer_table || true
+[ -x /opt/RepeatScout/filter-stage-1.prl ] && ln -sf /opt/RepeatScout/filter-stage-1.prl /usr/local/bin/filter-stage-1.prl || true
+[ -x /opt/RepeatScout/filter-stage-2.prl ] && ln -sf /opt/RepeatScout/filter-stage-2.prl /usr/local/bin/filter-stage-2.prl || true
+if [ -d /opt/RECON/bin ]; then
+  for f in /opt/RECON/bin/*; do [ -x "$f" ] && ln -sf "$f" /usr/local/bin/"$(basename "$f")" || true; done
+fi
+
+# Shell prompt
+echo "PS1='(dfam-tetools \w)\$ '" >> /etc/bash.bashrc
+
+%runscript
+# Default: open a login shell
+exec bash -l "$@"
+
+%help
+Build:
+  sudo singularity build repeatmasker.sif rep.def
+
+Bind & seed an external Libraries dir (copy in-image base libs, exclude famdb):
+  singularity run -B /data/rm_libs/Libraries:/opt/RepeatMasker/Libraries repeatmasker.sif rm_copy_base_libs.sh
+
+Run quick checks:
+  singularity run -B /data/rm_libs/Libraries:/opt/RepeatMasker/Libraries -B "$PWD":"$PWD" --pwd "$PWD" repeatmasker.sif \
+    bash -lc 'RepeatMasker -version; RepeatModeler -help'
+
+Typical workflow inside a run shell:
+  BuildDatabase -name genome1 genome1.fa
+  RepeatModeler -database genome1 -threads 24
+  RepeatMasker -pa 24 -e rmblast -lib 01.repeatmodeler/families.fa genome1.fa

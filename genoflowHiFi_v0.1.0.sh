@@ -583,54 +583,89 @@ echo "[INFO] Configuration loaded. working_dir=${working_dir} base=${base} threa
 if [[ "${run_hifiasm}" == "TRUE" ]]; then
   echo "[INFO] Step 1: Hifiasm — starting"
 
-  # Preflight
-  [[ -s "${pacbio_hifi}" ]] || error "HiFi input not found: ${pacbio_hifi}"
-  mkdir -p "${dir1}"
+  mkdir -p "${dir1}" "${dir1}/logs" "${dir1}/checkpoints"
+  ck1_preflight="${dir1}/checkpoints/step1.preflight.done"
+  ck1_hifiasm="${dir1}/checkpoints/step1.hifiasm.done"
+  ck1_fasta="${dir1}/checkpoints/step1.primary_fasta.done"
+  ck1_compress="${dir1}/checkpoints/step1.compress_gfa.done"
+  ck1_done="${dir1}/checkpoints/step1.done"
 
-  # Activate env and verify binary
-  activate_env "${ENV_HIFIASM}"
-  command -v hifiasm >/dev/null 2>&1 || error "hifiasm binary not found in PATH (expected: hifiasm)"
-
-  # Output base (Hifiasm writes multiple files with this prefix)
   asm_prefix="${dir1}/${base}"
-
-  # Skip if final FASTA already present (idempotent resume)
   final_ctg_fa="${asm_prefix}.bp.p_ctg.fa"
-  if [[ -s "${final_ctg_fa}" ]]; then
-    echo "[INFO] Hifiasm output already exists: ${final_ctg_fa} — skipping assembly"
-    deactivate_env
+  p_ctg_gfa="${asm_prefix}.bp.p_ctg.gfa"
+  p_ctg_gfa_gz="${p_ctg_gfa}.gz"
+
+  if [[ -f "${ck1_done}" && -s "${final_ctg_fa}" ]]; then
+    echo "[INFO] Step 1 checkpoint present — skipping Hifiasm"
   else
-    echo "[INFO] Running hifiasm on ${pacbio_hifi}"
-    echo "       threads=$((nthreads * njobs)) tmpdir=${tmpdir} out=${asm_prefix}"
-
-    # Core run (tuned flags preserved from prior version)
-    # -u 1         : purge duplicated haplotigs (stringent); adjust if desired
-    # --ctg-n 3    : aggressive contig break near potential errors (as in original)
-    # Input        : single HiFi fq.gz file supported directly
-    hifiasm \
-      -o "${asm_prefix}" \
-      -t "$((nthreads * njobs))" \
-      -u 1 \
-      --ctg-n 3 \
-      "${pacbio_hifi}" \
-      2>&1 | tee -a "${dir1}/hifiasm.log" || error "hifiasm failed"
-
-    # Convert primary contig GFA -> FASTA (standard extraction for hifiasm)
-    p_ctg_gfa="${asm_prefix}.bp.p_ctg.gfa"
-    if [[ -s "${p_ctg_gfa}" ]]; then
-      awk '/^S\t/{print ">"$2"\n"$3}' "${p_ctg_gfa}" > "${final_ctg_fa}" \
-        || error "Failed to convert ${p_ctg_gfa} to FASTA"
-      echo "[INFO] Generated FASTA: ${final_ctg_fa}"
+    # 1A) Preflight
+    if [[ -f "${ck1_preflight}" && -s "${pacbio_hifi}" ]]; then
+      echo "[INFO] Step 1A: preflight checkpoint present"
     else
-      error "Expected GFA not found: ${p_ctg_gfa}"
+      rm -f "${ck1_preflight}" "${ck1_done}"
+      [[ -s "${pacbio_hifi}" ]] || error "HiFi input not found: ${pacbio_hifi}"
+      activate_env "${ENV_HIFIASM}"
+      command -v hifiasm >/dev/null 2>&1 || error "hifiasm binary not found in PATH (expected: hifiasm)"
+      deactivate_env
+      touch "${ck1_preflight}"
     fi
 
-    # Optional: compress large intermediate GFAs to save space
-    if [[ -s "${p_ctg_gfa}" ]]; then
-      pigz -f --best "${p_ctg_gfa}" || echo "[WARN] pigz failed on ${p_ctg_gfa}"
+    # 1B) Hifiasm run
+    if [[ -f "${ck1_hifiasm}" && ( -s "${p_ctg_gfa}" || -s "${p_ctg_gfa_gz}" || -s "${final_ctg_fa}" ) ]]; then
+      echo "[INFO] Step 1B: Hifiasm checkpoint present"
+    else
+      rm -f "${ck1_hifiasm}" "${ck1_fasta}" "${ck1_compress}" "${ck1_done}"
+      activate_env "${ENV_HIFIASM}"
+      command -v hifiasm >/dev/null 2>&1 || error "hifiasm binary not found in PATH (expected: hifiasm)"
+      echo "[INFO] Running hifiasm on ${pacbio_hifi}"
+      echo "       threads=$((nthreads * njobs)) tmpdir=${tmpdir} out=${asm_prefix}"
+      hifiasm \
+        -o "${asm_prefix}" \
+        -t "$((nthreads * njobs))" \
+        -u 1 \
+        --ctg-n 3 \
+        "${pacbio_hifi}" \
+        2>&1 | tee -a "${dir1}/logs/hifiasm.log" || error "hifiasm failed"
+      deactivate_env
+      [[ -s "${p_ctg_gfa}" || -s "${final_ctg_fa}" ]] \
+        || error "Expected Hifiasm primary contig output not found: ${p_ctg_gfa}"
+      touch "${ck1_hifiasm}"
     fi
 
-    deactivate_env
+    # 1C) Convert primary contig GFA to FASTA
+    if [[ -f "${ck1_fasta}" && -s "${final_ctg_fa}" ]]; then
+      echo "[INFO] Step 1C: primary FASTA checkpoint present"
+    else
+      rm -f "${ck1_fasta}" "${ck1_done}"
+      if [[ -s "${p_ctg_gfa}" ]]; then
+        awk '/^S\t/{print ">"$2"\n"$3}' "${p_ctg_gfa}" > "${final_ctg_fa}" \
+          || error "Failed to convert ${p_ctg_gfa} to FASTA"
+      elif [[ -s "${p_ctg_gfa_gz}" ]]; then
+        gzip -cd "${p_ctg_gfa_gz}" | awk '/^S\t/{print ">"$2"\n"$3}' > "${final_ctg_fa}" \
+          || error "Failed to convert ${p_ctg_gfa_gz} to FASTA"
+      else
+        error "Expected GFA not found: ${p_ctg_gfa} or ${p_ctg_gfa_gz}"
+      fi
+      [[ -s "${final_ctg_fa}" ]] || error "Generated FASTA is empty: ${final_ctg_fa}"
+      echo "[INFO] Generated FASTA: ${final_ctg_fa}"
+      touch "${ck1_fasta}"
+    fi
+
+    # 1D) Compress large primary GFA after successful FASTA generation
+    if [[ -f "${ck1_compress}" && ( -s "${p_ctg_gfa_gz}" || ! -e "${p_ctg_gfa}" ) ]]; then
+      echo "[INFO] Step 1D: GFA compression checkpoint present"
+    else
+      rm -f "${ck1_compress}" "${ck1_done}"
+      if [[ -s "${p_ctg_gfa}" ]]; then
+        pigz -f --best "${p_ctg_gfa}" || echo "[WARN] pigz failed on ${p_ctg_gfa}"
+      fi
+      [[ -s "${p_ctg_gfa_gz}" || ! -e "${p_ctg_gfa}" ]] || echo "[WARN] Hifiasm GFA remains uncompressed: ${p_ctg_gfa}"
+      touch "${ck1_compress}"
+    fi
+
+    [[ -s "${final_ctg_fa}" ]] || error "Step 1 incomplete: missing ${final_ctg_fa}"
+    touch "${ck1_done}"
+    echo "[INFO] Step 1 complete: ${final_ctg_fa}"
   fi
 fi
 
@@ -647,135 +682,171 @@ fi
 # ============================================================================================================================
 if [[ "${run_fcs_early}" == "TRUE" ]]; then
   echo "[INFO] Step 2: FCS (Adaptor + GX via Singularity) — starting"
-  mkdir -p "${dir2}/adaptor" "${dir2}/gx" "${dir2}/logs"
+  mkdir -p "${dir2}/adaptor" "${dir2}/gx" "${dir2}/logs" "${dir2}/checkpoints"
+
+  ck2_preflight="${dir2}/checkpoints/step2.preflight.done"
+  ck2_adaptor="${dir2}/checkpoints/step2.adaptor.done"
+  ck2_gxdb="${dir2}/checkpoints/step2.gxdb.done"
+  ck2_gx_screen="${dir2}/checkpoints/step2.gx_screen.done"
+  ck2_clean="${dir2}/checkpoints/step2.clean.done"
+  ck2_done="${dir2}/checkpoints/step2.done"
 
   # --- lightweight log helpers if not already defined ---
   if ! type -t log >/dev/null 2>&1;  then log()  { echo "[INFO]  $*"; };  fi
   if ! type -t warn >/dev/null 2>&1; then warn() { echo "[WARN]  $*" >&2; }; fi
   if ! type -t fatal >/dev/null 2>&1; then fatal(){ echo "[FATAL] $*" >&2; exit 1; }; fi
 
-  # --- Tool & input checks (containers already preflighted in config, but re-check lightly) ---
-  command -v singularity >/dev/null 2>&1 || fatal "STEP 2: 'singularity' not on PATH"
-  [[ -f "${sif_fcs_adaptor}" ]] || fatal "STEP 2: sif_fcs_adaptor missing: ${sif_fcs_adaptor}"
-  [[ -f "${sif_fcs_gx}"      ]] || fatal "STEP 2: sif_fcs_gx missing: ${sif_fcs_gx}"
-
   input_fasta="${dir1}/${base}.bp.p_ctg.fa"
-  [[ -s "${input_fasta}" ]] || fatal "STEP 2: Input FASTA not found: ${input_fasta} (did STEP 1 run?)"
-
-  mkdir -p "${GX_DB}"
-  [[ -w "${GX_DB}" ]] || fatal "STEP 2: GX_DB not writable: ${GX_DB}"
-
-  # -------------------- 2A) FCS-adaptor: screen --------------------
-  log "[STEP 2A] FCS-adaptor → ${dir2}/adaptor"
-  "${ADAPTOR_RUNNER}" \
-    --fasta-input "${input_fasta}" \
-    --output-dir  "${dir2}/adaptor" \
-    --container-engine singularity \
-    --image "${sif_fcs_adaptor}" \
-    --euk \
-    --debug \
-    2>&1 | tee -a "${dir2}/logs/fcs_adaptor.run.log"
-
-  # Prefer tool's standard cleaned location; fallback to clean.fasta or original
   after_adaptor="${dir2}/adaptor/cleaned_sequences/$(basename "${input_fasta}")"
-  if [[ ! -s "${after_adaptor}" && -s "${dir2}/adaptor/clean.fasta" ]]; then
-    after_adaptor="${dir2}/adaptor/clean.fasta"
-  fi
-  if [[ ! -s "${after_adaptor}" ]]; then
-    warn "[STEP 2A] Adaptor-cleaned FASTA not found; falling back to original assembly."
-    after_adaptor="${input_fasta}"
-  fi
+  step2_cleaned_fasta="${dir2}/gx/clean.fasta"
 
-  # -------------------- 2B) Ensure GX DB present (skip if complete) --------------------
   have_gxdb_step2() {
     local d="${GX_DB}"
-    # Required files for a complete GX DB
     local -a req=(all.assemblies.tsv all.blast_div.tsv.gz all.gxi all.gxs all.manifest all.meta.jsonl all.README.txt all.seq_info.tsv.gz all.taxa.tsv)
+    local f
     for f in "${req[@]}"; do [[ -s "${d}/$f" ]] || return 1; done
-    # If an interrupted sync marker exists, treat as incomplete
     [[ -d "${d}/gxdb.in_progress" ]] && return 1
     return 0
   }
 
-  mkdir -p "${GX_DB}"
-  [[ -w "${GX_DB}" ]] || fatal "STEP 2: GX_DB not writable: ${GX_DB}"
-
-  GX_BIND_MODE="rw"   # default writeable bind
-  for gx_lockfile in "${GX_DB}.lockfile" "${GX_DB}/gxdb.lockfile"; do
-    if [[ -f "${gx_lockfile}" ]] && ! head -n 1 "${gx_lockfile}" 2>/dev/null | grep -Eq '^[0-9]+,[^,[:space:]]+$'; then
-      warn "[STEP 2B] Removing malformed GX DB lockfile: ${gx_lockfile}"
-      rm -f "${gx_lockfile}" || fatal "STEP 2: failed to remove malformed lockfile: ${gx_lockfile}"
-    fi
-  done
-
-  if have_gxdb_step2; then
-    log "[STEP 2B] GX DB present → ${GX_DB} (skip download)"
-    # Remove stale in-progress marker if any
-    [[ -d "${GX_DB}/gxdb.in_progress" ]] && { warn "[STEP 2B] Removing stale gxdb.in_progress"; rm -rf "${GX_DB}/gxdb.in_progress"; }
-    GX_BIND_MODE="ro"  # mount read-only so run_gx cannot re-sync
+  if [[ -f "${ck2_done}" && -s "${step2_cleaned_fasta}" ]]; then
+    echo "[INFO] Step 2 checkpoint present — skipping FCS"
   else
-    log "[STEP 2B] Sync GX DB → ${GX_DB}"
-    # Clean any partial state before syncing
-    rm -rf "${GX_DB}/gxdb.in_progress" 2>/dev/null || true
-    singularity exec \
-      --bind "${GX_ROOT}:${GX_ROOT}" \
-      "${sif_fcs_gx}" \
-      python3 /app/bin/sync_files get \
-        --mft "${GX_MANIFEST}" \
-        --dir "${GX_DB}" \
-      2>&1 | tee -a "${dir2}/logs/fcs_gx.sync.log"
-    # Re-assess; if still incomplete, bail
-    have_gxdb_step2 || fatal "[STEP 2B] GX DB still incomplete after sync -> ${GX_DB}"
-    GX_BIND_MODE="ro"
-  fi
-
-  # -------------------- 2C) GX screen --------------------
-  log "[STEP 2C] GX screen → ${dir2}/gx"
-  mkdir -p "${dir2}/gx"
-
-  # Bind DB read-only when complete so run_gx cannot trigger a refresh
-  singularity exec \
-    --bind "${GX_DB}:/app/db/gxdb:${GX_BIND_MODE}" \
-    --bind "$(dirname "${after_adaptor}"):/sample-volume" \
-    --bind "${dir2}/gx:/output-volume" \
-    "${sif_fcs_gx}" \
-    python3 /app/bin/run_gx \
-      --fasta "/sample-volume/$(basename "${after_adaptor}")" \
-      --gx-db /app/db/gxdb \
-      --out-dir /output-volume \
-      ${TAXID:+--tax-id "${TAXID}"} \
-      --generate-logfile True \
-      --debug \
-    2>&1 | tee -a "${dir2}/logs/fcs_gx.run.log"
-
-  # -------------------- 2D) GX clean-genome (apply report) --------------------
-  # Robustly pick the first GX action report if present (safe under set -e)
-  gx_report="$(find "${dir2}/gx" -maxdepth 1 -type f -name '*fcs_gx_report.txt' -print -quit 2>/dev/null || true)"
-
-  if [[ -z "${gx_report}" ]]; then
-    log "[STEP 2D] No GX report found — using adaptor-cleaned (or original) as clean.fasta"
-    if [[ -s "${after_adaptor}" ]]; then
-      ln -sfn "${after_adaptor}" "${dir2}/gx/clean.fasta"
+    # 2A) Preflight
+    if [[ -f "${ck2_preflight}" && -s "${input_fasta}" ]]; then
+      log "[STEP 2A] Preflight checkpoint present"
     else
-      # Very defensive fallback: if adaptor stage produced nothing, pass through the original
-      ln -sfn "${input_fasta}" "${dir2}/gx/clean.fasta"
+      rm -f "${ck2_preflight}" "${ck2_done}"
+      command -v singularity >/dev/null 2>&1 || fatal "STEP 2: 'singularity' not on PATH"
+      [[ -f "${sif_fcs_adaptor}" ]] || fatal "STEP 2: sif_fcs_adaptor missing: ${sif_fcs_adaptor}"
+      [[ -f "${sif_fcs_gx}"      ]] || fatal "STEP 2: sif_fcs_gx missing: ${sif_fcs_gx}"
+      [[ -s "${input_fasta}" ]] || fatal "STEP 2: Input FASTA not found: ${input_fasta} (did STEP 1 run?)"
+      mkdir -p "${GX_DB}"
+      [[ -w "${GX_DB}" ]] || fatal "STEP 2: GX_DB not writable: ${GX_DB}"
+      touch "${ck2_preflight}"
     fi
-    step2_cleaned_fasta="${dir2}/gx/clean.fasta"
-  else
-    log "[STEP 2D] GX clean-genome → ${dir2}/gx/clean.fasta"
-    singularity exec \
-      --bind "${dir2}/gx:/report-volume" \
-      --bind "${dir2}/gx:/output-volume" \
-      --bind "$(dirname "${after_adaptor}"):/input-volume" \
-      "${sif_fcs_gx}" \
-      /app/bin/gx clean-genome \
-        --input "/input-volume/$(basename "${after_adaptor}")" \
-        --action-report "/report-volume/$(basename "${gx_report}")" \
-        --output "/output-volume/clean.fasta" \
-        --contam-fasta-out "/output-volume/contam.fasta" \
-        --min-seq-len 200 \
-      2>&1 | tee -a "${dir2}/logs/fcs_gx.clean.log"
-    step2_cleaned_fasta="${dir2}/gx/clean.fasta"
+
+    # 2B) FCS-adaptor screen
+    if [[ -f "${ck2_adaptor}" && ( -s "${after_adaptor}" || -s "${dir2}/adaptor/clean.fasta" ) ]]; then
+      log "[STEP 2B] FCS-adaptor checkpoint present"
+    else
+      rm -f "${ck2_adaptor}" "${ck2_clean}" "${ck2_done}"
+      log "[STEP 2B] FCS-adaptor → ${dir2}/adaptor"
+      "${ADAPTOR_RUNNER}" \
+        --fasta-input "${input_fasta}" \
+        --output-dir  "${dir2}/adaptor" \
+        --container-engine singularity \
+        --image "${sif_fcs_adaptor}" \
+        --euk \
+        --debug \
+        2>&1 | tee -a "${dir2}/logs/fcs_adaptor.run.log"
+      touch "${ck2_adaptor}"
+    fi
+
+    # Resolve adaptor output after possible rerun.
+    after_adaptor="${dir2}/adaptor/cleaned_sequences/$(basename "${input_fasta}")"
+    if [[ ! -s "${after_adaptor}" && -s "${dir2}/adaptor/clean.fasta" ]]; then
+      after_adaptor="${dir2}/adaptor/clean.fasta"
+    fi
+    if [[ ! -s "${after_adaptor}" ]]; then
+      warn "[STEP 2B] Adaptor-cleaned FASTA not found; falling back to original assembly."
+      after_adaptor="${input_fasta}"
+    fi
+
+    # 2C) Ensure GX DB present
+    mkdir -p "${GX_DB}"
+    [[ -w "${GX_DB}" ]] || fatal "STEP 2: GX_DB not writable: ${GX_DB}"
+
+    GX_BIND_MODE="rw"
+    for gx_lockfile in "${GX_DB}.lockfile" "${GX_DB}/gxdb.lockfile"; do
+      if [[ -f "${gx_lockfile}" ]] && ! head -n 1 "${gx_lockfile}" 2>/dev/null | grep -Eq '^[0-9]+,[^,[:space:]]+$'; then
+        warn "[STEP 2C] Removing malformed GX DB lockfile: ${gx_lockfile}"
+        rm -f "${gx_lockfile}" || fatal "STEP 2: failed to remove malformed lockfile: ${gx_lockfile}"
+      fi
+    done
+
+    if [[ -f "${ck2_gxdb}" && have_gxdb_step2 ]]; then
+      log "[STEP 2C] GX DB checkpoint present → ${GX_DB}"
+      GX_BIND_MODE="ro"
+    elif have_gxdb_step2; then
+      log "[STEP 2C] GX DB present → ${GX_DB} (marking checkpoint)"
+      [[ -d "${GX_DB}/gxdb.in_progress" ]] && { warn "[STEP 2C] Removing stale gxdb.in_progress"; rm -rf "${GX_DB}/gxdb.in_progress"; }
+      GX_BIND_MODE="ro"
+      touch "${ck2_gxdb}"
+    else
+      rm -f "${ck2_gxdb}" "${ck2_gx_screen}" "${ck2_clean}" "${ck2_done}"
+      log "[STEP 2C] Sync GX DB → ${GX_DB}"
+      rm -rf "${GX_DB}/gxdb.in_progress" 2>/dev/null || true
+      singularity exec \
+        --bind "${GX_ROOT}:${GX_ROOT}" \
+        "${sif_fcs_gx}" \
+        python3 /app/bin/sync_files get \
+          --mft "${GX_MANIFEST}" \
+          --dir "${GX_DB}" \
+        2>&1 | tee -a "${dir2}/logs/fcs_gx.sync.log"
+      have_gxdb_step2 || fatal "[STEP 2C] GX DB still incomplete after sync -> ${GX_DB}"
+      GX_BIND_MODE="ro"
+      touch "${ck2_gxdb}"
+    fi
+
+    # 2D) GX screen
+    gx_report="$(find "${dir2}/gx" -maxdepth 1 -type f -name '*fcs_gx_report.txt' -print -quit 2>/dev/null || true)"
+    if [[ -f "${ck2_gx_screen}" && ( -n "${gx_report}" || -s "${dir2}/gx/clean.fasta" ) ]]; then
+      log "[STEP 2D] GX screen checkpoint present"
+    else
+      rm -f "${ck2_gx_screen}" "${ck2_clean}" "${ck2_done}"
+      log "[STEP 2D] GX screen → ${dir2}/gx"
+      mkdir -p "${dir2}/gx"
+      singularity exec \
+        --bind "${GX_DB}:/app/db/gxdb:${GX_BIND_MODE}" \
+        --bind "$(dirname "${after_adaptor}"):/sample-volume" \
+        --bind "${dir2}/gx:/output-volume" \
+        "${sif_fcs_gx}" \
+        python3 /app/bin/run_gx \
+          --fasta "/sample-volume/$(basename "${after_adaptor}")" \
+          --gx-db /app/db/gxdb \
+          --out-dir /output-volume \
+          ${TAXID:+--tax-id "${TAXID}"} \
+          --generate-logfile True \
+          --debug \
+        2>&1 | tee -a "${dir2}/logs/fcs_gx.run.log"
+      touch "${ck2_gx_screen}"
+    fi
+
+    # 2E) GX clean-genome or fallback publish
+    gx_report="$(find "${dir2}/gx" -maxdepth 1 -type f -name '*fcs_gx_report.txt' -print -quit 2>/dev/null || true)"
+    if [[ -f "${ck2_clean}" && -s "${step2_cleaned_fasta}" ]]; then
+      log "[STEP 2E] clean.fasta checkpoint present"
+    else
+      rm -f "${ck2_clean}" "${ck2_done}"
+      if [[ -z "${gx_report}" ]]; then
+        log "[STEP 2E] No GX report found — using adaptor-cleaned (or original) as clean.fasta"
+        if [[ -s "${after_adaptor}" ]]; then
+          ln -sfn "${after_adaptor}" "${step2_cleaned_fasta}"
+        else
+          ln -sfn "${input_fasta}" "${step2_cleaned_fasta}"
+        fi
+      else
+        log "[STEP 2E] GX clean-genome → ${step2_cleaned_fasta}"
+        singularity exec \
+          --bind "${dir2}/gx:/report-volume" \
+          --bind "${dir2}/gx:/output-volume" \
+          --bind "$(dirname "${after_adaptor}"):/input-volume" \
+          "${sif_fcs_gx}" \
+          /app/bin/gx clean-genome \
+            --input "/input-volume/$(basename "${after_adaptor}")" \
+            --action-report "/report-volume/$(basename "${gx_report}")" \
+            --output "/output-volume/clean.fasta" \
+            --contam-fasta-out "/output-volume/contam.fasta" \
+            --min-seq-len 200 \
+          2>&1 | tee -a "${dir2}/logs/fcs_gx.clean.log"
+      fi
+      [[ -s "${step2_cleaned_fasta}" ]] || fatal "STEP 2: clean FASTA missing after FCS: ${step2_cleaned_fasta}"
+      touch "${ck2_clean}"
+    fi
+
+    [[ -s "${step2_cleaned_fasta}" ]] || fatal "STEP 2: final clean FASTA missing: ${step2_cleaned_fasta}"
+    touch "${ck2_done}"
   fi
 
   export step2_cleaned_fasta
@@ -2738,6 +2809,10 @@ if [[ "${run_stats:-FALSE}" == "TRUE" ]]; then
   ck_quast="${dir7}/checkpoints/step7.quast.done"
   ck_busco="${dir7}/checkpoints/step7.busco.done"
   ck_btk="${dir7}/checkpoints/step7.btk.done"
+  ck7_btk_ref="${dir7}/checkpoints/step7.btk.ref.done"
+  ck7_btk_map="${dir7}/checkpoints/step7.btk.map.done"
+  ck7_btk_markdup="${dir7}/checkpoints/step7.btk.markdup.done"
+  ck7_btk_blast="${dir7}/checkpoints/step7.btk.blast.done"
   ck7_btk_dataset="${dir7}/checkpoints/step7.btk.dataset.done"
   ck7_btk_plots="${dir7}/checkpoints/step7.btk.plots.done"
   ck_qualimap="${dir7}/checkpoints/step7.qualimap.done"
@@ -2874,92 +2949,179 @@ if [[ "${run_stats:-FALSE}" == "TRUE" ]]; then
 
   # --------------------------- 7c) BlobToolKit ---------------------------
   echo "[INFO] Step 7c: BlobToolKit"
-  if [[ ! -f "${ck_btk}" ]]; then
+  if [[ -f "${ck_btk}" \
+        && -s "${blobdir_path}/meta.json" \
+        && -s "${bt_prefix}.markdup.bam" \
+        && -s "${bt_prefix}.markdup.bam.bai" \
+        && -s "${bt_prefix}.markdup.bam.csi" ]]; then
+    echo "[INFO] Step 7c: BlobToolKit checkpoint present — skipping"
+  else
     mkdir -p "${btk_dir}" "${BLOB_TAXDUMP_DIR}"
 
     # Use the same assembly as BUSCO for BTK dataset
     bt_ref="${busco_target}"
 
-    # Helper: ensure dict & fai for coverage mapping
-    if [[ ! -s "${bt_ref}.dict" ]]; then
-      echo "[INFO] Creating sequence dictionary for ${bt_ref}"
-      singularity exec -B "${working_dir}:${working_dir}" "${sif_gatk4}" \
-        gatk CreateSequenceDictionary -R "${bt_ref}" -O "${bt_ref}.dict" \
-        || error "CreateSequenceDictionary failed for ${bt_ref}"
-    fi
-    if [[ ! -s "${bt_ref}.fai" ]]; then
-      echo "[INFO] Indexing ${bt_ref} with samtools faidx"
-      "${samtools_bin}" faidx "${bt_ref}" || error "samtools faidx failed for ${bt_ref}"
-    fi
-
-    # 1) Map HiFi reads for coverage
-    echo "[INFO] Mapping PacBio HiFi reads to ${bt_ref} for coverage"
-    "${minimap2_bin}" -ax map-hifi -H -Y --secondary=no -K 16G -t "$((nthreads * njobs))" -R "@RG\\tID:${base}.HiFi\\tSM:${base}\\tPL:PACBIO\\tLB:SMRTbell" "${bt_ref}" "${pacbio_hifi}" \
-    | "${samtools_bin}" sort -@ "$((nthreads * njobs))" -m 8G -l 9 -O BAM -o "${bt_prefix}.bam" --write-index \
-    || error "BlobToolKit mapping/sort failed"
-
-	    echo "[INFO] Marking duplicates (BlobToolKit coverage)"
-	    spark_threads="$((nthreads * njobs))"
-		    markdup_shard_tmp="${tmpdir}/gatk_markdup.blobtoolkit.shards"
-		    markdup_tmp="${tmpdir}/gatk_markdup.blobtoolkit.tmp"
-		    rm -rf "${markdup_shard_tmp}" "${markdup_tmp}"
-		    mkdir -p "${markdup_tmp}"
-		    rm -f "${bt_prefix}.markdup.bam" "${bt_prefix}.markdup.bam.bai" "${bt_prefix}.markdup.bam.csi"
-    gatk_spark \
-      --java-options "-Xms128G -Xmx256G -Djava.io.tmpdir=${tmpdir}" \
-      MarkDuplicatesSpark \
-        --spark-master "local[${spark_threads}]" \
-        --conf "spark.driver.host=127.0.0.1" \
-        --conf "spark.driver.bindAddress=127.0.0.1" \
-        --conf "spark.local.dir=${tmpdir}" \
-        --input "${bt_prefix}.bam" \
-        --metrics-file "${bt_prefix}.metrics" \
-        --output "${bt_prefix}.markdup.bam" \
-        --reference "${bt_ref}" \
-	        --remove-all-duplicates true \
-	        --create-output-bam-index true \
-        --create-output-bam-splitting-index false \
-        --read-name-regex null \
-        --read-validation-stringency SILENT \
-	        --tmp-dir "${markdup_tmp}" \
-	        --output-shard-tmp-dir "${markdup_shard_tmp}" \
-    2>&1 | tee -a "${btk_dir}/hifi.markduplicates.log" \
-    || error "MarkDuplicates failed (BlobToolKit coverage)"
-
-	    "${samtools_bin}" index -b -@ "${spark_threads}" "${bt_prefix}.markdup.bam" \
-	      || error "Indexing markdup BAM failed"
-	    rm -rf "${markdup_shard_tmp}" "${markdup_tmp}"
-
-    # 2) BLAST hits
-    hits_path="${btk_dir}/blast.hits"
-
-    # Ensure we're in bash and be robust to empty/spacey vars
-    if [[ -n ${blastn_bin-} ]] && [[ -x ${blastn_bin} ]]; then
-      echo "[INFO] Running BLAST (megablast) for BlobToolKit hits"
-      "${blastn_bin}" \
-        -task megablast \
-        -query "${bt_ref}" \
-        -db "${BLAST_DB_ROOT}" \
-        -outfmt '6 qseqid staxids bitscore std' \
-        -num_threads "$((nthreads * njobs))" \
-        -max_hsps 1 \
-        -evalue 1e-25 \
-        -out "${hits_path}" \
-      || echo "[WARN] BLAST failed; continuing without hits"
+    # 7c.0) Reference dictionary and FASTA index
+    if [[ -s "${bt_ref}.dict" && -s "${bt_ref}.fai" ]]; then
+      info "Step 7c.0: reference dictionary and FASTA index already complete"
+      touch "${ck7_btk_ref}"
     else
-      echo "[WARN] blastn not found or not executable; proceeding without hits"
-      : > "${hits_path}"
+      rm -f "${ck7_btk_ref}" "${ck_btk}"
+      if [[ ! -s "${bt_ref}.dict" ]]; then
+        echo "[INFO] Creating sequence dictionary for ${bt_ref}"
+        singularity exec \
+          -B "${working_dir}:${working_dir}" \
+          "${sif_gatk4}" \
+          gatk CreateSequenceDictionary \
+            -R "${bt_ref}" \
+            -O "${bt_ref}.dict" \
+          || error "CreateSequenceDictionary failed for ${bt_ref}"
+      fi
+      if [[ ! -s "${bt_ref}.fai" ]]; then
+        echo "[INFO] Indexing ${bt_ref} with samtools faidx"
+        "${samtools_bin}" faidx "${bt_ref}" \
+          || error "samtools faidx failed for ${bt_ref}"
+      fi
+      [[ -s "${bt_ref}.dict" && -s "${bt_ref}.fai" ]] \
+        || error "BlobToolKit reference prep incomplete for ${bt_ref}"
+      touch "${ck7_btk_ref}"
     fi
 
-    # 3) Create BlobToolKit dataset (coverage + optional hits + optional BUSCO)
+    # 7c.1) HiFi read mapping for coverage
+    if [[ -s "${bt_prefix}.bam" ]]; then
+      info "Step 7c.1: coverage mapping BAM already complete"
+      touch "${ck7_btk_map}"
+    else
+      rm -f "${ck7_btk_map}" "${ck7_btk_markdup}" "${ck7_btk_dataset}" "${ck_btk}"
+      rm -f "${bt_prefix}.bam" "${bt_prefix}.bam.bai" "${bt_prefix}.bam.csi"
+      echo "[INFO] Mapping PacBio HiFi reads to ${bt_ref} for coverage"
+      "${minimap2_bin}" \
+        -ax map-hifi \
+        -H \
+        -Y \
+        --secondary=no \
+        -K 16G \
+        -t "$((nthreads * njobs))" \
+        -R "@RG\\tID:${base}.HiFi\\tSM:${base}\\tPL:PACBIO\\tLB:SMRTbell" \
+        "${bt_ref}" \
+        "${pacbio_hifi}" \
+      | "${samtools_bin}" sort \
+          -@ "$((nthreads * njobs))" \
+          -m 8G \
+          -l 9 \
+          -O BAM \
+          -o "${bt_prefix}.bam" \
+          --write-index \
+      || error "BlobToolKit mapping/sort failed"
+      [[ -s "${bt_prefix}.bam" ]] \
+        || error "BlobToolKit mapping output missing: ${bt_prefix}.bam"
+      touch "${ck7_btk_map}"
+    fi
+
+    # 7c.2) MarkDuplicates BAM plus both index types
+    echo "[INFO] Checking duplicate-marked BAM and CSI for BlobToolKit coverage"
+    spark_threads="$((nthreads * njobs))"
+    markdup_shard_tmp="${tmpdir}/gatk_markdup.blobtoolkit.shards"
+    markdup_tmp="${tmpdir}/gatk_markdup.blobtoolkit.tmp"
+
+    if [[ -s "${bt_prefix}.markdup.bam" \
+          && -s "${bt_prefix}.markdup.bam.bai" \
+          && -s "${bt_prefix}.markdup.bam.csi" ]]; then
+      info "Step 7c.2: duplicate-marked BAM, BAI, and CSI already complete"
+      touch "${ck7_btk_markdup}"
+    else
+      rm -f "${ck7_btk_markdup}" "${ck7_btk_dataset}" "${ck_btk}"
+
+      if [[ -s "${bt_prefix}.markdup.bam" && -s "${bt_prefix}.markdup.bam.bai" ]]; then
+        echo "[INFO] Existing GATK MarkDuplicates BAM/BAI found; creating missing SAMtools CSI if needed"
+      else
+        rm -rf "${markdup_shard_tmp}" "${markdup_tmp}"
+        mkdir -p "${markdup_tmp}"
+        rm -f "${bt_prefix}.markdup.bam" "${bt_prefix}.markdup.bam.bai" "${bt_prefix}.markdup.bam.csi"
+
+        echo "[INFO] Marking duplicates (BlobToolKit coverage)"
+        gatk_spark \
+          --java-options "-Xms128G -Xmx256G -Djava.io.tmpdir=${tmpdir}" \
+          MarkDuplicatesSpark \
+            --spark-master "local[${spark_threads}]" \
+            --conf "spark.driver.host=127.0.0.1" \
+            --conf "spark.driver.bindAddress=127.0.0.1" \
+            --conf "spark.local.dir=${tmpdir}" \
+            --input "${bt_prefix}.bam" \
+            --metrics-file "${bt_prefix}.metrics" \
+            --output "${bt_prefix}.markdup.bam" \
+            --reference "${bt_ref}" \
+            --remove-all-duplicates true \
+            --create-output-bam-index true \
+            --create-output-bam-splitting-index false \
+            --read-name-regex null \
+            --read-validation-stringency SILENT \
+            --tmp-dir "${markdup_tmp}" \
+            --output-shard-tmp-dir "${markdup_shard_tmp}" \
+          2>&1 | tee -a "${btk_dir}/hifi.markduplicates.log" \
+          || error "MarkDuplicates failed (BlobToolKit coverage)"
+      fi
+
+      [[ -s "${bt_prefix}.markdup.bam" ]] \
+        || error "MarkDuplicates output missing for BlobToolKit coverage"
+      [[ -s "${bt_prefix}.markdup.bam.bai" ]] \
+        || error "GATK MarkDuplicates did not create BAI: ${bt_prefix}.markdup.bam.bai"
+
+      rm -f "${bt_prefix}.markdup.bam.csi"
+      "${samtools_bin}" index \
+        -c \
+        -@ "${spark_threads}" \
+        "${bt_prefix}.markdup.bam" \
+        || error "CSI indexing of BlobToolKit MarkDuplicates BAM failed"
+      [[ -s "${bt_prefix}.markdup.bam.csi" ]] \
+        || error "SAMtools did not create CSI: ${bt_prefix}.markdup.bam.csi"
+
+      rm -rf "${markdup_shard_tmp}" "${markdup_tmp}"
+      touch "${ck7_btk_markdup}"
+    fi
+
+    # 7c.2b) BLAST hits
+    hits_path="${btk_dir}/blast.hits"
+    if [[ -f "${hits_path}" ]]; then
+      info "Step 7c.2b: BLAST hits already complete"
+      touch "${ck7_btk_blast}"
+    else
+      rm -f "${ck7_btk_blast}" "${ck7_btk_dataset}" "${ck_btk}"
+      if [[ -n ${blastn_bin-} ]] && [[ -x ${blastn_bin} ]]; then
+        echo "[INFO] Running BLAST (megablast) for BlobToolKit hits"
+        if ! "${blastn_bin}" \
+          -task megablast \
+          -query "${bt_ref}" \
+          -db "${BLAST_DB_ROOT}" \
+          -outfmt '6 qseqid staxids bitscore std' \
+          -num_threads "$((nthreads * njobs))" \
+          -max_hsps 1 \
+          -evalue 1e-25 \
+          -out "${hits_path}"; then
+          echo "[WARN] BLAST failed; continuing without hits"
+          : > "${hits_path}"
+        fi
+      else
+        echo "[WARN] blastn not found or not executable; proceeding without hits"
+        : > "${hits_path}"
+      fi
+      [[ -f "${hits_path}" ]] || : > "${hits_path}"
+      touch "${ck7_btk_blast}"
+    fi
+
+    # 7c.3) Create BlobToolKit dataset (coverage + optional hits + optional BUSCO)
     info "Creating BlobToolKit dataset"
     mkdir -p "${blobdir_path}" "${plots_out}"
 
     # Sanity checks
-    [[ -s "${bt_ref}" ]] || error "Missing FASTA for BlobToolKit: ${bt_ref}"
-    [[ -s "${bt_prefix}.markdup.bam" ]] || error "Missing BAM for coverage: ${bt_prefix}.markdup.bam"
-    [[ -s "${bt_prefix}.markdup.bam.csi" || -s "${bt_prefix}.markdup.bam.bai" ]] \
-      || error "Missing BAM index for coverage: ${bt_prefix}.markdup.bam"
+    [[ -s "${bt_ref}" ]] \
+      || error "Missing FASTA for BlobToolKit: ${bt_ref}"
+    [[ -s "${bt_prefix}.markdup.bam" ]] \
+      || error "Missing BAM for coverage: ${bt_prefix}.markdup.bam"
+    [[ -s "${bt_prefix}.markdup.bam.bai" ]] \
+      || error "Missing GATK BAI for coverage: ${bt_prefix}.markdup.bam.bai"
+    [[ -s "${bt_prefix}.markdup.bam.csi" ]] \
+      || error "Missing SAMtools CSI for BlobToolKit coverage: ${bt_prefix}.markdup.bam.csi"
 
     # Optional BlobToolKit arguments
     btk_extra_args=()
@@ -2985,8 +3147,9 @@ if [[ "${run_stats:-FALSE}" == "TRUE" ]]; then
     btk_threads="${nthreads:-1}"
     [[ "${btk_threads}" -ge 1 ]] || btk_threads=1
 
-    if [[ -f "${ck7_btk_dataset}" && -s "${blobdir_path}/meta.json" ]]; then
+    if [[ -s "${blobdir_path}/meta.json" ]]; then
       info "Step 7c.3: BlobToolKit dataset already complete"
+      touch "${ck7_btk_dataset}"
     else
       rm -f "${ck7_btk_dataset}" "${ck_btk}"
 
@@ -3010,8 +3173,10 @@ if [[ "${run_stats:-FALSE}" == "TRUE" ]]; then
       touch "${ck7_btk_dataset}"
     fi
 
-    if [[ -f "${ck7_btk_plots}" && -n "$(find "${plots_out}" -maxdepth 1 -type f -name '*.svg' -print -quit 2>/dev/null || true)" ]]; then
+    # 7c.4) BlobToolKit plots
+    if [[ -n "$(find "${plots_out}" -maxdepth 1 -type f -name '*.svg' -print -quit 2>/dev/null || true)" ]]; then
       info "Step 7c.4: BlobToolKit plots already complete"
+      touch "${ck7_btk_plots}"
     else
       info "Rendering BlobToolKit plots"
       rm -f "${ck7_btk_plots}"
@@ -3057,10 +3222,8 @@ if [[ "${run_stats:-FALSE}" == "TRUE" ]]; then
     [[ -s "${blobdir_path}/meta.json" ]] \
       || error "BlobToolKit dataset incomplete: missing ${blobdir_path}/meta.json"
 
-	    touch "${ck_btk}"
-	  else
-	    echo "[INFO] Step 7c: BlobToolKit checkpoint present — skipping"
-	  fi
+    touch "${ck_btk}"
+  fi
 
   # --------------------------- 7d) Qualimap bamqc ---------------------------
   echo "[INFO] Step 7d: Qualimap bamqc (HiFi->assembly BAM)"
@@ -4836,7 +4999,17 @@ if repeat_checkpoint_ready collect_outputs; then
 # ============================================================================================================================
 
 echo "[INFO] Step 9: Final Summary — starting"
-mkdir -p "${dir7}" "${dir7}/logs"
+mkdir -p "${dir7}" "${dir7}/logs" "${dir7}/checkpoints"
+ck_summary="${dir7}/checkpoints/step9.summary.done"
+summary_txt="${dir7}/run_summary.txt"
+summary_tsv="${dir7}/run_summary.tsv"
+summary_json="${dir7}/run_summary.json"
+summary_tail="${dir7}/logs/summary_tail.log"
+
+if [[ -f "${ck_summary}" && -s "${summary_txt}" && -s "${summary_tsv}" && -s "${summary_json}" && -s "${summary_tail}" ]]; then
+  echo "[INFO] Step 9 checkpoint present — skipping final summary generation"
+else
+  rm -f "${ck_summary}"
 
 # --------------------------- helpers ---------------------------
 now_ts() { date +%s; }
@@ -4958,10 +5131,6 @@ read -r BUSCO_C BUSCO_S BUSCO_D BUSCO_F BUSCO_M BUSCO_n < <(busco_summary "$busc
 
 # Final assembly contig counts + size (human-readable)
 read -r final_ctg_n final_ctg_bp final_ctg_size < <(contig_stats "$final_target")
-
-summary_txt="${dir7}/run_summary.txt"
-summary_tsv="${dir7}/run_summary.tsv"
-summary_json="${dir7}/run_summary.json"
 
 # Step 5 scaffolding selection artifacts.
 scaffolding_scores="${dir5}/selection/longstitch_scores.tsv"
@@ -5177,7 +5346,7 @@ fi
         printf '\n### %s\n' "$(realpath --relative-to="$working_dir" "$f" 2>/dev/null || printf '%s' "$f")"
         tail -n 20 "$f" || true
       done
-} > "${dir7}/logs/summary_tail.log" || true
+} > "${summary_tail}" || true
 
 # --------------------------- stderr topline ---------------------------
 {
@@ -5185,5 +5354,9 @@ fi
     "$(basename "$final_target")" "$final_ctg_size" "${N50:-'-'}" "${L50:-'-'}" "${BUSCO_C:-'-'}" \
     "$repeat_summary_status" "$host" "$cpu_threads" "$mem_total_gb" "$start_h" "$end_h" "$runtime_h"
 } >&2
+
+[[ -s "${summary_txt}" && -s "${summary_tsv}" && -s "${summary_json}" && -s "${summary_tail}" ]]   || error "Step 9 summary generation incomplete"
+touch "${ck_summary}"
+fi
 
 echo "[INFO] Pipeline complete. Summary: ${summary_txt} | ${summary_tsv} | ${summary_json}"

@@ -15,7 +15,7 @@ set -euo pipefail
 #   bash install_miniforge3_envs.sh
 #
 # Optional:
-#   MINIFORGE_PREFIX="$HOME/software/miniforge3" bash install_miniforge3_envs.sh
+#   MINIFORGE_PREFIX="$HOME/miniforge3" bash install_miniforge3_envs.sh
 #   FORCE_RECREATE=1 bash install_miniforge3_envs.sh
 #
 # Notes:
@@ -308,6 +308,73 @@ create_env() {
   run_mamba create -n "$env_name" "${CHANNEL_ARGS[@]}" -y "$@"
 }
 
+create_eggnogmapper_env() {
+  local env_name="EGGNOGMAPPERenv"
+  remove_env_if_needed "${env_name}"
+
+  if env_exists "${env_name}"; then
+    log "Environment already exists: ${env_name}; refreshing pip-installed eggNOG-mapper."
+  else
+    log "Creating eggNOG-mapper environment with Python 3.10 and required executables."
+    run_mamba create -n EGGNOGMAPPERenv -c conda-forge -c bioconda --override-channels --strict-channel-priority -y \
+      python=3.10 pip git diamond hmmer mmseqs2 prodigal wget
+  fi
+
+  source "${MINIFORGE_PROFILE_DIR}/conda.sh"
+  conda activate EGGNOGMAPPERenv
+  which python
+  which pip
+  python -c 'import sys; print(sys.executable)'
+  unset PIP_REQUIRE_VIRTUALENV
+  python -m pip install --upgrade pip setuptools wheel
+  python -m pip install --no-cache-dir "git+https://github.com/eggnogdb/eggnog-mapper.git@v2.1.14"
+  conda deactivate
+}
+
+create_feems_env() {
+  local env_name="FEEMSenv"
+  remove_env_if_needed "${env_name}"
+
+  if env_exists "${env_name}"; then
+    log "Environment already exists: ${env_name}; refreshing pip-installed FEEMS."
+  else
+    log "Creating FEEMS environment with Python 3.12 and required geospatial/sparse dependencies."
+    run_mamba create -n FEEMSenv -c conda-forge -c bioconda --override-channels --strict-channel-priority -y \
+      python=3.12 scikit-sparse suitesparse cartopy geos notebook pip
+  fi
+
+  source "${MINIFORGE_PROFILE_DIR}/conda.sh"
+  conda activate FEEMSenv
+  which python
+  which pip
+  python -c 'import sys; print(sys.executable)'
+  python -m pip install --upgrade pip setuptools wheel
+  python -m pip install --no-cache-dir git+https://github.com/NovembreLab/feems
+  conda deactivate
+}
+
+create_phlash_env() {
+  local env_name="PHLASHenv"
+  remove_env_if_needed "${env_name}"
+
+  if env_exists "${env_name}"; then
+    log "Environment already exists: ${env_name}; refreshing pip-installed PHLASH."
+  else
+    log "Creating PHLASH environment with Python 3.12 and required geospatial/sparse dependencies."
+    run_mamba create -n PHLASHenv -c conda-forge -c bioconda --override-channels --strict-channel-priority -y \
+      python=3.12 pip git wget curl numpy scipy matplotlib plotly
+  fi
+
+  source "${MINIFORGE_PROFILE_DIR}/conda.sh"
+  conda activate PHLASHenv
+  which python
+  which pip
+  python -c 'import sys; print(sys.executable)'
+  python -m pip install --upgrade pip setuptools wheel
+  python -m pip install phlash
+  conda deactivate
+}
+
 update_base_env() {
   log "Updating Miniforge3 base environment."
 
@@ -367,22 +434,28 @@ prepare_base_env() {
 #######################################
 
 create_pipeline_envs() {
-  create_env HIFIASMenv       hifiasm yak
-  create_env NEXTPOLISH2env   nextpolish2
-  create_env INSPECTORenv     inspector
-  create_env LONGSTITCHenv    longstitch
-  create_env QUASTenv         quast
   create_env BUSCOenv         busco=6.0.0 sepp=4.5.5
+  create_env DBCANenv         dbcan=5.2.9
+  create_env DIAMONDenv       diamond=2.2.1
+  create_env EARLGREYenv      earlgrey=7.2.6 bc repeatmasker=4.2.3 repeatmodeler=2.0.7
+  create_eggnogmapper_env
+  create_feems_env
+  create_phlash_env
   create_env GEMOMAenv        gemoma=1.9
-  create_env HICenv           chromap yahs
-  create_env TETOOLSenv       repeatmasker=4.2.3 repeatmodeler=2.0.8
-  create_env TETRIMMERenv     tetrimmer
-  create_env EARLGREYenv      earlgrey bc repeatmodeler=2.0.7
-  create_env QUALIMAPenv      qualimap
-  create_env PAIRTOOLSenv     pairtools cooler
-  create_env GETORGANELLEenv  getorganelle
-  create_env MERQURYenv       merqury
   create_env GENOMESCOPE2env  genomescope2
+  create_env GETORGANELLEenv  getorganelle
+  create_env HICenv           chromap yahs
+  create_env HIFIASMenv       hifiasm yak
+  create_env INSPECTORenv     inspector
+  create_env KOFAMSCANenv     kofamscan=1.3.0
+  create_env LONGSTITCHenv    longstitch
+  create_env MAFFTenv         mafft=7.525
+  create_env MERQURYenv       merqury
+  create_env NEXTPOLISH2env   nextpolish2 yak
+  create_env PAIRTOOLSenv     pairtools cooler
+  create_env QUALIMAPenv      qualimap
+  create_env QUASTenv         quast
+  create_env TETRIMMERenv     tetrimmer
 }
 
 #######################################
@@ -393,22 +466,28 @@ validate_envs() {
   log "Validating created environments."
 
   local envs=(
-    HIFIASMenv
-    NEXTPOLISH2env
-    INSPECTORenv
-    LONGSTITCHenv
-    QUASTenv
     BUSCOenv
-    GEMOMAenv
-    HICenv
-    TETOOLSenv
-    TETRIMMERenv
+    DBCANenv
+    DIAMONDenv
     EARLGREYenv
-    QUALIMAPenv
-    PAIRTOOLSenv
-    GETORGANELLEenv
-    MERQURYenv
+    EGGNOGMAPPERenv
+    FEEMSenv
+    GEMOMAenv
     GENOMESCOPE2env
+    GETORGANELLEenv
+    HICenv
+    HIFIASMenv
+    INSPECTORenv
+    KOFAMSCANenv
+    LONGSTITCHenv
+    MAFFTenv
+    MERQURYenv
+    NEXTPOLISH2env
+    PAIRTOOLSenv
+    PHLASHenv
+    QUALIMAPenv
+    QUASTenv
+    TETRIMMERenv
   )
 
   for env_name in "${envs[@]}"; do
@@ -477,6 +556,8 @@ Restart the shell or run:
 
 To activate an environment:
   mamba activate HIFIASMenv
+  mamba activate EGGNOGMAPPERenv
+  mamba activate FEEMSenv
 
 Conda activation also remains available:
   source "${MINIFORGE_PROFILE_DIR}/conda.sh"

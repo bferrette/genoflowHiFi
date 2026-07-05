@@ -131,7 +131,7 @@ run_repeats=${run_repeats:-"TRUE"}
 # ---- Conda bootstrap -------------------------------------------------------------
 CONDA_SH=${CONDA_SH:-""}
 if [[ -z "$CONDA_SH" || ! -s "$CONDA_SH" ]]; then
-  candidate="$HOME/anaconda3/etc/profile.d/conda.sh"
+  candidate="$HOME/miniforge3/etc/profile.d/conda.sh"
   [[ -s "$candidate" ]] && CONDA_SH="$candidate"
 fi
 
@@ -139,13 +139,13 @@ if [[ -s "$CONDA_SH" ]]; then
   # shellcheck source=/dev/null
   source "$CONDA_SH"
 else
-  echo "[ERROR] Cannot source conda from $HOME anaconda3 paths" >&2
+  echo "[ERROR] Cannot source conda from $HOME miniforge3 paths" >&2
   exit 1
 fi
 
 MAMBA_SH=${MAMBA_SH:-""}
 if [[ -z "$MAMBA_SH" || ! -s "$MAMBA_SH" ]]; then
-  candidate="$HOME/anaconda3/etc/profile.d/mamba.sh"
+  candidate="$HOME/miniforge3/etc/profile.d/mamba.sh"
   [[ -s "$candidate" ]] && MAMBA_SH="$candidate"
 fi
 if [[ -n "$MAMBA_SH" && -s "$MAMBA_SH" ]]; then
@@ -322,8 +322,13 @@ EARLGREY_SOFTMASK=${EARLGREY_SOFTMASK:-"yes"}
 EARLGREY_HELIANO=${EARLGREY_HELIANO:-"yes"}
 EARLGREY_REPEATMASKER_SPECIES=${EARLGREY_REPEATMASKER_SPECIES:-"none"}
 EARLGREY_ENHANCED_PLOTS=${EARLGREY_ENHANCED_PLOTS:-"TRUE"}
+EARLGREY_ARCHIVE_INCOMPLETE=${EARLGREY_ARCHIVE_INCOMPLETE:-"TRUE"}
+# How to handle incomplete Earl Grey outputs: resume | archive | error
+# resume keeps expensive RepeatMasker/HELIANO outputs and removes only downstream stale merge/defragmentation artifacts.
+EARLGREY_INCOMPLETE_POLICY=${EARLGREY_INCOMPLETE_POLICY:-"resume"}
 EARLGREY_PLOT_DPI=${EARLGREY_PLOT_DPI:-600}
 EARLGREY_PLOT_TOP_FAMILIES=${EARLGREY_PLOT_TOP_FAMILIES:-30}
+NON_REPEATS_REPEATS_BED=${NON_REPEATS_REPEATS_BED:-""}
 
 # ===================================================================================================================
 # ===================================================================================================================
@@ -1113,15 +1118,36 @@ if is_true "${run_scaffolding}"; then
     grep -Eq 'Genome|Heterozygosity|Model' "${gs_summary}" || return 1
   }
 
+  longstitch_cell_output() {
+    local k="$1" w="$2"
+    printf '%s/kw_k%s_w%s/%s.k%s.w%s.scaffolds.fa' "${dir5}" "$k" "$w" "${base}" "$k" "$w"
+  }
+
+  longstitch_cell_checkpoint() {
+    local k="$1" w="$2"
+    printf '%s/kw_k%s_w%s/.longstitch.ok' "${dir5}" "$k" "$w"
+  }
+
+  scaffolding_longstitch_cell_ready() {
+    local k="$1" w="$2" out ck
+    out="$(longstitch_cell_output "$k" "$w")"
+    ck="$(longstitch_cell_checkpoint "$k" "$w")"
+    [[ -s "$out" ]] || return 1
+    [[ -f "$ck" ]] || touch "$ck"
+    return 0
+  }
+
   scaffolding_longstitch_grid_ready() {
-    local f found=0
-    shopt -s nullglob
-    for f in "${dir5}"/kw_k*_w*/*.scaffolds.fa; do
-      [[ -s "$f" ]] || continue
-      found=1
-      break
+    local k w found=0
+    read -r -a _grid_k_values <<< "${LONGSTITCH_K_VALUES}"
+    read -r -a _grid_w_values <<< "${LONGSTITCH_W_VALUES}"
+    (( ${#_grid_k_values[@]} > 0 && ${#_grid_w_values[@]} > 0 )) || return 1
+    for k in "${_grid_k_values[@]}"; do
+      for w in "${_grid_w_values[@]}"; do
+        found=1
+        scaffolding_longstitch_cell_ready "$k" "$w" || return 1
+      done
     done
-    shopt -u nullglob
     (( found == 1 ))
   }
 
@@ -1454,22 +1480,28 @@ if is_true "${run_scaffolding}"; then
   # -------------------- STEP 5D: LongStitch broad grid --------------------
   run_scaffolding_kw() {
     local k="${1:-}" w="${2:-}"
-    local run_dir out_scaff reads_base draft_base ls_status
+    local run_dir out_scaff cell_ck reads_base draft_base ls_status
     local -a ls_args=()
 
     [[ -n "${k}" && -n "${w}" ]] || { echo "[ERROR] run_scaffolding_kw: missing k or w" >&2; return 2; }
 
     run_dir="${dir5}/kw_k${k}_w${w}"
     mkdir -p "${run_dir}"
-    out_scaff="${run_dir}/${base}.k${k}.w${w}.scaffolds.fa"
+    out_scaff="$(longstitch_cell_output "${k}" "${w}")"
+    cell_ck="$(longstitch_cell_checkpoint "${k}" "${w}")"
 
-    if [[ -s "${out_scaff}" && -s "${run_dir}/.longstitch.ok" ]]; then
+    if [[ -s "${out_scaff}" && -f "${cell_ck}" ]]; then
       echo "[INFO] [k=${k}, w=${w}] LongStitch output exists; skipping"
+      return 0
+    fi
+    if [[ -s "${out_scaff}" ]]; then
+      echo "[INFO] [k=${k}, w=${w}] LongStitch final FASTA exists; marking checkpoint"
+      touch "${cell_ck}"
       return 0
     fi
 
     find "${run_dir}" -maxdepth 1 \( -type f -o -type l \) -name "contig_corrected.fa.k${k}.w${w}*" -delete
-    rm -f "${out_scaff}" "${run_dir}/.longstitch.ok"
+    rm -f "${out_scaff}" "${cell_ck}"
 
     echo "[INFO] [k=${k}, w=${w}] Running LongStitch in ${run_dir}"
     pushd "${run_dir}" >/dev/null || { echo "[ERROR] cd failed for ${run_dir}" >&2; return 1; }
@@ -1506,10 +1538,11 @@ if is_true "${run_scaffolding}"; then
     fi
 
     [[ -s "${out_scaff}" ]] || { echo "[ERROR] LongStitch did not produce ${out_scaff}" >&2; popd >/dev/null; return 1; }
-    touch "${run_dir}/.longstitch.ok"
+    touch "${cell_ck}"
     popd >/dev/null
   }
   export -f run_scaffolding_kw
+  export -f longstitch_cell_output longstitch_cell_checkpoint
   export dir5 base draft longstitch_reads longstitch_longmap longstitch_genome_size nthreads LONGSTITCH_MODE LONGSTITCH_ROUNDS
 
   read -r -a k_values <<< "${LONGSTITCH_K_VALUES}"
@@ -1522,6 +1555,7 @@ if is_true "${run_scaffolding}"; then
     parallel --jobs "${njobs}" --load 80% --memfree 128G --tmpdir "${tmpdir}" \
       --env run_scaffolding_kw --env dir5 --env base --env draft --env longstitch_reads --env longstitch_genome_size \
       --env nthreads --env longstitch_longmap --env LONGSTITCH_MODE --env LONGSTITCH_ROUNDS \
+      --env longstitch_cell_output --env longstitch_cell_checkpoint \
       run_scaffolding_kw "{1}" "{2}" ::: "${k_values[@]}" ::: "${w_values[@]}" \
       2>&1 | tee -a "${grid_log}"
     grid_rc=${PIPESTATUS[0]:-0}
@@ -1532,8 +1566,7 @@ if is_true "${run_scaffolding}"; then
 
   candidate_manifest="${scaff_selection_dir}/candidate_manifest.tsv"
   printf "assembly_id\tk\tw\tpath\n" > "${candidate_manifest}"
-  shopt -s nullglob
-  for f in "${dir5}"/kw_k*_w*/"${base}".k*.w*.scaffolds.fa; do
+  while IFS= read -r f; do
     [[ -s "${f}" ]] || continue
     run_leaf="$(basename "$(dirname "${f}")")"
     k_val="$(sed -E 's/.*kw_k([0-9]+)_w([0-9]+).*/\1/' <<< "${run_leaf}")"
@@ -1541,8 +1574,15 @@ if is_true "${run_scaffolding}"; then
     asm_id="$(basename "${f}")"
     asm_id="${asm_id%.fa}"; asm_id="${asm_id%.fasta}"; asm_id="${asm_id%.fna}"
     printf "%s\t%s\t%s\t%s\n" "${asm_id}" "${k_val}" "${w_val}" "${f}" >> "${candidate_manifest}"
-  done
-  shopt -u nullglob
+  done < <(
+    find "${dir5}" \
+      -mindepth 2 \
+      -maxdepth 2 \
+      \( -type f -o -type l \) \
+      -name "${base}.*.scaffolds.fa" \
+      -print \
+      | sort -V
+  )
   (( "$(wc -l < "${candidate_manifest}")" > 1 )) || error "No scaffold assemblies found after LongStitch grid"
 
   # -------------------- STEP 5E: QUAST structural evaluation --------------------
@@ -3308,6 +3348,25 @@ if is_true "${run_repeats:-FALSE}"; then
     fi
   fi
 
+env_run_clean_r() {
+  # Run a command in a conda environment while removing R variables inherited
+  # from the login shell or other conda environments. This prevents Earl Grey's
+  # internal Rscript calls from using the wrong R library/configuration.
+  local env="${1:-}"
+  shift || true
+  [[ -n "${env}" ]] || error "env_run_clean_r: missing environment name"
+  env \
+    -u R_ARCH \
+    -u R_ARCHS \
+    -u R_HOME \
+    -u R_LIBS \
+    -u R_LIBS_USER \
+    -u R_LIBS_SITE \
+    -u R_PROFILE_USER \
+    -u R_ENVIRON_USER \
+    "${ENV_RUNNER}" run -n "${env}" "$@"
+}
+
 # ============================================================
 # HELPER FUNCTIONS
 # ============================================================
@@ -3471,7 +3530,7 @@ step_output_ready() {
       find "$DIR_REPEATMASKER" -maxdepth 1 -type f \( -name "*.out" -o -name "*.gff" -o -name "*.tbl" -o -name "*.masked" \) -size +0c 2>/dev/null | grep -q .
       ;;
     earlgrey)
-      find "$DIR_EARLGREY" -type f \( -name "*.gff" -o -name "*.gff3" -o -name "*.summary" -o -name "*.tbl" -o -name "*.masked" -o -name "*.fa" -o -name "*.fasta" \) -size +0c 2>/dev/null | grep -q .
+      earlgrey_core_outputs_complete
       ;;
     earlgrey_plots)
       if ! is_true "${EARLGREY_ENHANCED_PLOTS:-TRUE}"; then
@@ -3604,6 +3663,172 @@ audit_tetrimmer_outputs() {
   } > "${DIR_LOGS}/02_tetrimmer.output_audit.txt"
 }
 
+earlgrey_core_outputs_complete() {
+  # Earl Grey creates many large intermediate files before the final report is
+  # complete. Use the observed completed Earl Grey annotation-only layout as
+  # the success contract: summaryFiles + RepeatLandscape + looseMerge finals.
+  local eg_root="${DIR_EARLGREY}/${SPECIES}_EarlGrey"
+  local merged="${eg_root}/${SPECIES}_mergedRepeats"
+  local loose="${merged}/looseMerge"
+  local summary="${eg_root}/${SPECIES}_summaryFiles"
+  local landscape="${eg_root}/${SPECIES}_RepeatLandscape"
+
+  [[ -d "$eg_root" ]] || return 1
+  [[ -d "$summary" ]] || return 1
+  [[ -d "$landscape" ]] || return 1
+
+  # Final annotation products copied by Earl Grey into summaryFiles.
+  [[ -s "${summary}/${SPECIES}.filteredRepeats.bed" ]] || return 1
+  [[ -s "${summary}/${SPECIES}.filteredRepeats.gff" ]] || return 1
+
+  # Final abundance summaries.
+  [[ -s "${summary}/${SPECIES}.highLevelCount.txt" ]] || return 1
+  [[ -s "${summary}/${SPECIES}.familyLevelCount.txt" ]] || return 1
+
+  # Divergence table and Kimura-bearing GFF.
+  [[ -s "${summary}/${SPECIES}_divergence_summary_table.tsv" ]] || return 1
+  [[ -s "${landscape}/${SPECIES}.filteredRepeats.withDivergence.gff" ]] || return 1
+
+  # Softmasked genome and Earl Grey native plots.
+  [[ -s "${summary}/${SPECIES}.softmasked.fasta" ]] || return 1
+  [[ -s "${summary}/${SPECIES}_classification_landscape.pdf" || -s "${landscape}/${SPECIES}_classification_landscape.pdf" ]] || return 1
+  [[ -s "${summary}/${SPECIES}_split_class_landscape.pdf" || -s "${landscape}/${SPECIES}_split_class_landscape.pdf" ]] || return 1
+  [[ -s "${summary}/${SPECIES}_superfamily_div_plot.pdf" || -s "${landscape}/${SPECIES}_superfamily_div_plot.pdf" ]] || return 1
+  [[ -s "${summary}/${SPECIES}.summaryPie.pdf" ]] || return 1
+
+  # looseMerge finals are useful to confirm that the defragmentation/filtering
+  # stage really completed. These are not enough alone, but they should exist
+  # in a complete annotation-only run.
+  [[ -s "${loose}/${SPECIES}.rmerge.gff.filtered" ]] || return 1
+  [[ -s "${loose}/${SPECIES}.filteredRepeats.bed" ]] || return 1
+  [[ -s "${loose}/${SPECIES}.filteredRepeats.gff" ]] || return 1
+
+  return 0
+}
+
+audit_earlgrey_outputs() {
+  local eg_root="${DIR_EARLGREY}/${SPECIES}_EarlGrey"
+  local summary="${eg_root}/${SPECIES}_summaryFiles"
+  local landscape="${eg_root}/${SPECIES}_RepeatLandscape"
+  local loose="${eg_root}/${SPECIES}_mergedRepeats/looseMerge"
+  local audit="${DIR_LOGS}/05_earlgrey_annotation_only.output_audit.tsv"
+  local f
+
+  mkdir -p "${DIR_LOGS}"
+
+  {
+    printf 'label\tpath\texists\tsize_bytes\n'
+
+    for f in \
+      "${summary}/${SPECIES}.filteredRepeats.bed" \
+      "${summary}/${SPECIES}.filteredRepeats.gff" \
+      "${summary}/${SPECIES}.highLevelCount.txt" \
+      "${summary}/${SPECIES}.familyLevelCount.txt" \
+      "${summary}/${SPECIES}_divergence_summary_table.tsv" \
+      "${summary}/${SPECIES}.softmasked.fasta" \
+      "${summary}/${SPECIES}_classification_landscape.pdf" \
+      "${summary}/${SPECIES}_split_class_landscape.pdf" \
+      "${summary}/${SPECIES}_superfamily_div_plot.pdf" \
+      "${summary}/${SPECIES}.summaryPie.pdf" \
+      "${landscape}/${SPECIES}.filteredRepeats.withDivergence.gff" \
+      "${landscape}/${SPECIES}_summary_table.tsv" \
+      "${loose}/${SPECIES}.rmerge.gff.filtered" \
+      "${loose}/${SPECIES}.filteredRepeats.bed" \
+      "${loose}/${SPECIES}.filteredRepeats.gff"
+    do
+      if [[ -e "$f" ]]; then
+        printf '%s\t%s\tTRUE\t%s\n' "$(basename "$f")" "$f" "$(stat -c '%s' "$f")"
+      else
+        printf '%s\t%s\tFALSE\t0\n' "$(basename "$f")" "$f"
+      fi
+    done
+  } > "$audit"
+}
+earlgrey_prepare_resume_from_failed_merge() {
+  # Earl Grey can resume expensive upstream stages if their directories remain.
+  # The common failure after the GenomeInfoDbData error occurs during the
+  # downstream defragmentation/filtering phase. In that state, keeping
+  # RepeatMasker and HELIANO outputs is useful, but stale downstream products
+  # such as looseMerge can make Earl Grey abort with "File exists".
+  local eg_root="${DIR_EARLGREY}/${SPECIES}_EarlGrey"
+  local merged="${eg_root}/${SPECIES}_mergedRepeats"
+  local summary="${eg_root}/${SPECIES}_summaryFiles"
+  local landscape="${eg_root}/${SPECIES}_RepeatLandscape"
+  local stamp
+  local rescue_dir
+
+  [[ -d "$eg_root" ]] || return 0
+
+  stamp="$(date +%Y%m%d_%H%M%S)"
+  rescue_dir="${PROJECT_ROOT}/failed_runs/earlgrey_resume_cleanup/${stamp}"
+  mkdir -p "$rescue_dir"
+
+  echo "[WARN] Earl Grey output directory is incomplete; attempting resume-safe cleanup."
+  echo "[WARN] Keeping completed upstream outputs such as RepeatMasker and HELIANO."
+  echo "[WARN] Moving stale downstream files to: $rescue_dir"
+
+  mkdir -p "$merged" "$summary"
+
+  # This directory is created with plain mkdir by Earl Grey. If it already
+  # exists from a failed run, Earl Grey may abort before resuming.
+  if [[ -e "${merged}/looseMerge" ]]; then
+    mv "${merged}/looseMerge" "${rescue_dir}/looseMerge.${stamp}"
+  fi
+
+  # Remove/park final products that may be zero-byte, truncated, or out of sync.
+  # Do not remove the large upstream RepeatMasker directory or HELIANO directory.
+  for f in     "${merged}/${SPECIES}.filteredRepeats.bed"     "${merged}/${SPECIES}.filteredRepeats.bed.2"     "${merged}/${SPECIES}.rmerge.gff.filtered"     "${merged}/${SPECIES}.rmerge.gff.filtered.2"     "${summary}/${SPECIES}.filteredRepeats.bed"     "${summary}/${SPECIES}.filteredRepeats.gff"     "${summary}/${SPECIES}.filteredRepeats.withDivergence.gff"     "${summary}/${SPECIES}.highLevelCount.txt"     "${summary}/${SPECIES}.familyLevelCount.txt"     "${landscape}/${SPECIES}.filteredRepeats.withDivergence.gff"
+  do
+    if [[ -e "$f" ]]; then
+      mkdir -p "${rescue_dir}/$(dirname "${f#${eg_root}/}")"
+      mv "$f" "${rescue_dir}/${f#${eg_root}/}.${stamp}"
+    fi
+  done
+
+  rm -f "$(repeat_checkpoint_file earlgrey)"         "$(repeat_checkpoint_file earlgrey_plots)"         "$(repeat_checkpoint_file collect_outputs)"         "$(repeat_checkpoint_file non_repeats)"
+
+  return 0
+}
+
+prepare_earlgrey_output_dir() {
+  [[ -d "$DIR_EARLGREY" ]] || return 0
+
+  if earlgrey_core_outputs_complete; then
+    return 0
+  fi
+
+  if dir_has_nonempty_file_or_link "$DIR_EARLGREY"; then
+    case "$EARLGREY_INCOMPLETE_POLICY" in
+      resume)
+        earlgrey_prepare_resume_from_failed_merge
+        ;;
+      archive)
+        if is_true "$EARLGREY_ARCHIVE_INCOMPLETE"; then
+          mkdir -p "${PROJECT_ROOT}/failed_runs/earlgrey"
+          stamp="$(date +%Y%m%d_%H%M%S)"
+          dest="${PROJECT_ROOT}/failed_runs/earlgrey/$(basename "$DIR_EARLGREY").${stamp}"
+          echo "[WARN] Earl Grey output directory is incomplete or stale."
+          echo "[WARN] Archiving: $DIR_EARLGREY -> $dest"
+          mv "$DIR_EARLGREY" "$dest"
+          mkdir -p "$DIR_EARLGREY"
+          rm -f "$(repeat_checkpoint_file earlgrey)" "$(repeat_checkpoint_file earlgrey_plots)" "$(repeat_checkpoint_file collect_outputs)" "$(repeat_checkpoint_file non_repeats)"
+        else
+          echo "[ERROR] Earl Grey output directory is incomplete: $DIR_EARLGREY" >&2
+          echo "[ERROR] Set EARLGREY_INCOMPLETE_POLICY=resume, archive, or error." >&2
+          exit 1
+        fi
+        ;;
+      error)
+        echo "[ERROR] Earl Grey output directory is incomplete: $DIR_EARLGREY" >&2
+        echo "[ERROR] Set EARLGREY_INCOMPLETE_POLICY=resume to keep upstream outputs and retry downstream stages." >&2
+        exit 1
+        ;;
+    esac
+  fi
+
+  return 0
+}
+
 known_library_needs_build() {
   if repeat_checkpoint_ready known; then
     return 1
@@ -3678,6 +3903,30 @@ write_earlgrey_enhanced_plotter() {
   cat > "$script_path" <<'RSCRIPT'
 #!/usr/bin/env Rscript
 
+# ============================================================
+# earlgrey_standard_enhanced_plotter.R
+#
+# Standalone plotter for Earl Grey annotation-only outputs.
+# Recreates standard Earl Grey-like plots and creates enhanced
+# publication-ready versions using the final Earl Grey outputs.
+# This palette-fixed version follows Earl Grey autoLand.R/autoPie.R
+# class collapsing and London Underground colour assignments where possible.
+# v3 explicitly protects SINE/tRNA/7SL/5S/MIR labels from being reclassified
+# as generic RNA/Other during regex collapsing:
+#   <species>_summaryFiles/<species>.highLevelCount.txt
+#   <species>_summaryFiles/<species>.familyLevelCount.txt
+#   <species>_summaryFiles/<species>_divergence_summary_table.tsv
+#   <species>_RepeatLandscape/<species>.filteredRepeats.withDivergence.gff
+#
+# Usage:
+#   Rscript --vanilla earlgrey_standard_enhanced_plotter.R \
+#     --species 7777 \
+#     --earlgrey_dir /path/to/7777_EarlGrey \
+#     --outdir /path/to/enhanced_plots \
+#     --dpi 600 \
+#     --top_families 30
+# ============================================================
+
 args <- commandArgs(trailingOnly = TRUE)
 
 arg_value <- function(flag, default = NA_character_) {
@@ -3686,33 +3935,88 @@ arg_value <- function(flag, default = NA_character_) {
   args[idx[1] + 1]
 }
 
+is_true <- function(x) {
+  tolower(as.character(x)) %in% c("true", "t", "yes", "y", "1")
+}
+
 species <- arg_value("--species")
 earlgrey_dir <- arg_value("--earlgrey_dir")
 outdir <- arg_value("--outdir")
 dpi <- suppressWarnings(as.integer(arg_value("--dpi", "600")))
 top_n <- suppressWarnings(as.integer(arg_value("--top_families", "30")))
+binwidth <- suppressWarnings(as.numeric(arg_value("--binwidth", "0.01")))
+max_kimura <- suppressWarnings(as.numeric(arg_value("--max_kimura", "0.5")))
+make_standard <- is_true(arg_value("--standard", "TRUE"))
+make_enhanced <- is_true(arg_value("--enhanced", "TRUE"))
+debug_palette <- is_true(arg_value("--debug_palette", "FALSE"))
 
 if (is.na(species) || !nzchar(species)) stop("--species is required")
 if (is.na(earlgrey_dir) || !dir.exists(earlgrey_dir)) stop("--earlgrey_dir must exist")
 if (is.na(outdir) || !nzchar(outdir)) stop("--outdir is required")
 if (!is.finite(dpi) || dpi < 1) dpi <- 600L
 if (!is.finite(top_n) || top_n < 1) top_n <- 30L
+if (!is.finite(binwidth) || binwidth <= 0) binwidth <- 0.01
+if (!is.finite(max_kimura) || max_kimura <= 0) max_kimura <- 0.5
 
 dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
 
-for (pkg in c("ggplot2")) {
-  if (!requireNamespace(pkg, quietly = TRUE)) {
-    stop("Missing required R package: ", pkg)
-  }
-}
+required_pkgs <- c("ggplot2")
+missing_pkgs <- required_pkgs[!vapply(required_pkgs, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing_pkgs)) stop("Missing required R package(s): ", paste(missing_pkgs, collapse = ", "))
+
+has_data_table <- requireNamespace("data.table", quietly = TRUE)
+has_scales <- requireNamespace("scales", quietly = TRUE)
+has_grid <- requireNamespace("grid", quietly = TRUE)
 
 read_tsv <- function(path) {
-  utils::read.delim(path, sep = "\t", header = TRUE, check.names = FALSE,
-                    stringsAsFactors = FALSE, quote = "", comment.char = "")
+  if (is.na(path) || !file.exists(path) || file.info(path)$size == 0) {
+    return(data.frame())
+  }
+  if (has_data_table) {
+    return(as.data.frame(data.table::fread(
+      path, sep = "\t", header = TRUE, quote = "", data.table = FALSE,
+      showProgress = FALSE
+    )))
+  }
+  utils::read.delim(
+    path, sep = "\t", header = TRUE, check.names = FALSE,
+    stringsAsFactors = FALSE, quote = "", comment.char = ""
+  )
+}
+
+read_gff_minimal <- function(path) {
+  if (is.na(path) || !file.exists(path) || file.info(path)$size == 0) {
+    return(data.frame())
+  }
+  if (has_data_table) {
+    x <- data.table::fread(
+      path, sep = "\t", header = FALSE, quote = "", comment.char = "#",
+      data.table = FALSE, select = c(3, 4, 5, 9), showProgress = FALSE
+    )
+    names(x) <- c("repeat_class", "start", "end", "metadata")
+    return(x)
+  }
+  x <- utils::read.delim(
+    path, sep = "\t", header = FALSE, quote = "", comment.char = "",
+    fill = TRUE, stringsAsFactors = FALSE, col.names = paste0("V", seq_len(9))
+  )
+  data.frame(
+    repeat_class = x$V3, start = x$V4, end = x$V5, metadata = x$V9,
+    stringsAsFactors = FALSE
+  )
 }
 
 num_col <- function(x) {
   suppressWarnings(as.numeric(gsub(",", "", as.character(x))))
+}
+
+label_bp <- function(x) {
+  if (has_scales) return(scales::label_number(scale_cut = scales::cut_short_scale())(x))
+  out <- ifelse(abs(x) >= 1e9, paste0(format(round(x / 1e9, 1), trim = TRUE), "G"),
+         ifelse(abs(x) >= 1e6, paste0(format(round(x / 1e6, 1), trim = TRUE), "M"),
+         ifelse(abs(x) >= 1e3, paste0(format(round(x / 1e3, 1), trim = TRUE), "K"),
+                format(round(x, 0), trim = TRUE))))
+  out
 }
 
 find_first <- function(pattern, prefer = character()) {
@@ -3721,27 +4025,12 @@ find_first <- function(pattern, prefer = character()) {
   if (length(files) == 0) return(NA_character_)
   if (length(prefer) > 0) {
     score <- rep(length(prefer) + 1L, length(files))
-    for (i in seq_along(prefer)) {
-      score[grepl(prefer[[i]], files, fixed = TRUE)] <- i
-    }
+    for (i in seq_along(prefer)) score[grepl(prefer[[i]], files, fixed = TRUE)] <- i
     files <- files[order(score, files)]
   } else {
     files <- sort(files)
   }
   files[[1]]
-}
-
-class_base <- function(x) {
-  x <- as.character(x)
-  x <- sub("-nested$", "", x)
-  x <- sub("/.*$", "", x)
-  x <- sub("-.*$", "", x)
-  x <- ifelse(grepl("^RC$|Rolling Circle", x), "Rolling Circle", x)
-  x <- ifelse(grepl("Penelope|^PLE$", x), "Penelope", x)
-  x <- ifelse(grepl("^Unknown|Unclassified|unknown", x), "Unclassified", x)
-  x <- ifelse(grepl("Simple_repeat|Low_complexity|Satellite|RNA|Microsatellite|Other", x),
-              "Other simple or low-complexity", x)
-  x
 }
 
 extract_attr <- function(x, key) {
@@ -3751,97 +4040,468 @@ extract_attr <- function(x, key) {
   vapply(out, function(z) if (length(z) >= 3) z[[3]] else NA_character_, character(1))
 }
 
-class_palette <- c(
-  "DNA" = "#b2182b",
-  "Rolling Circle" = "#ef8a62",
-  "Penelope" = "#7b3294",
-  "LINE" = "#2166ac",
-  "SINE" = "#c51b7d",
-  "LTR" = "#1b7837",
-  "Unclassified" = "#636363",
-  "Other simple or low-complexity" = "#a6dba0",
-  "Non-Repeat" = "#000000",
-  "Other" = "#bdbdbd"
+clean_token <- function(x) {
+  x <- as.character(x)
+  x <- gsub("%20", " ", x, fixed = TRUE)
+  x <- gsub("%2F", "/", x, fixed = TRUE)
+  x <- gsub("%23", "#", x, fixed = TRUE)
+  x <- sub("-nested$", "", x)
+  x <- sub("_merged$", "", x)
+  trimws(x)
+}
+
+subclass_abbrev <- function(x) {
+  # Earl Grey-style class collapsing with explicit SINE protection.
+  # Important: do not use a broad "rna" regex before/after SINE matching,
+  # because tRNA contains the substring "rna" and should remain SINE.
+  z <- tolower(clean_token(x))
+  z <- gsub("%2f", "/", z, fixed = TRUE)
+  z <- gsub("%23", "#", z, fixed = TRUE)
+  sep <- "(^|[/#;:_\\. -])"
+  end <- "($|[/#;:_\\. -])"
+
+  out <- rep("Unknown", length(z))
+
+  # Other/low-complexity first, but avoid matching tRNA as generic RNA.
+  other_pat <- paste0(
+    "simple[_ -]?repeat|satellite|low[_ -]?complexity|microsatellite|",
+    sep, "rna", end, "|^other", "|unknown_other|artefact|segmenta"
+  )
+  out[grepl(other_pat, z, perl = TRUE)] <- "Other"
+
+  # Specific TE classes. These deliberately run after Other so SINE/tRNA can
+  # override an accidental broad label, matching the biological class rather
+  # than the generic RNA bucket.
+  out[grepl("(^|[/#;:_\\. -])(dna|tir|cmc|hat|tc1|tcmar|pif|zisupton|maverick|polinton|piggybac|academ|crypton)($|[/#;:_\\. -])|dna[ _-]?transposon", z, perl = TRUE)] <- "DNA"
+  out[grepl("(^|[/#;:_\\. -])(line|cr1|l1|l2|r2|rex|rte|jockey|i-jockey|ingi|tx1)($|[/#;:_\\. -])", z, perl = TRUE)] <- "LINE"
+  out[grepl("(^|[/#;:_\\. -])(ltr|gypsy|copia|dirs|erv|erv1|ervl|pao|bel)($|[/#;:_\\. -])|ltr[ _-]?retrotransposon", z, perl = TRUE)] <- "LTR"
+
+  # SINE-specific rule. Includes tRNA, 7SL, 5S, MIR and common SINE aliases.
+  out[grepl("(^|[/#;:_\\. -])(sine|trna|t-rna|7sl|5s|mir|alu|b2|b4|id)($|[/#;:_\\. -])", z, perl = TRUE)] <- "SINE"
+
+  out[grepl("penelope|(^|[/#;:_\\. -])ple($|[/#;:_\\. -])", z, perl = TRUE)] <- "PLE"
+  out[grepl("rolling|helitron|(^|[/#;:_\\. -])rc($|[/#;:_\\. -])", z, perl = TRUE)] <- "RC"
+
+  # Unknown/unclassified only if no informative class was found.
+  unknown_hit <- grepl("unknown|unclassified|unspecified|retroposon", z, perl = TRUE)
+  out[unknown_hit & out == "Unknown"] <- "Unknown"
+
+  out
+}
+
+subclass_label <- function(x) {
+  y <- subclass_abbrev(x)
+  map <- c(
+    DNA = "DNA Transposon", LINE = "LINE", LTR = "LTR Retrotransposon",
+    SINE = "SINE", PLE = "Penelope", RC = "Rolling Circle",
+    Other = "Other", Unknown = "Unknown"
+  )
+  unname(map[y])
+}
+
+class_base <- function(x) subclass_label(x)
+
+superfamily_label <- function(te_type, repeat_class = NA_character_, metadata = NA_character_) {
+  # This function intentionally avoids using raw family names as superfamily
+  # labels. Earl Grey's native plotting scripts collapse repeat labels into a
+  # small set of biologically interpretable classes, and only use explicit
+  # class/superfamily tokens when they are present. If NAME lacks a "#" or the
+  # token after "#" lacks "/", we fall back to the broad Earl Grey class.
+  te_type <- clean_token(te_type)
+  repeat_class <- clean_token(repeat_class)
+  name_attr <- extract_attr(metadata, "NAME")
+
+  n <- max(length(te_type), length(repeat_class), length(name_attr))
+  te_type <- rep(te_type, length.out = n)
+  repeat_class <- rep(repeat_class, length.out = n)
+  name_attr <- rep(name_attr, length.out = n)
+
+  explicit_type <- rep(NA_character_, n)
+  has_hash <- !is.na(name_attr) & nzchar(name_attr) & grepl("#", name_attr, fixed = TRUE)
+  explicit_type[has_hash] <- sub("^.*#", "", name_attr[has_hash])
+  explicit_type <- clean_token(explicit_type)
+  explicit_type <- sub(";.*$", "", explicit_type)
+
+  # Source used for broad Earl Grey class assignment.
+  class_source <- ifelse(!is.na(explicit_type) & nzchar(explicit_type), explicit_type,
+                         ifelse(!is.na(te_type) & nzchar(te_type), te_type, repeat_class))
+  broad <- subclass_abbrev(class_source)
+
+  # Only derive superfamily from explicit class/superfamily strings, e.g.
+  # DNA/TcMar, LINE/CR1, LTR/Gypsy. Do not treat family names such as
+  # ACADEM-1_SP or tandem-repeat labels as superfamilies.
+  sf <- rep(NA_character_, n)
+  has_slash <- !is.na(explicit_type) & nzchar(explicit_type) & grepl("/", explicit_type, fixed = TRUE)
+  sf[has_slash] <- sub("^.*/", "", explicit_type[has_slash])
+  sf <- clean_token(sf)
+
+  # Normalize specific superfamily labels.
+  sf[grepl("cmc", sf, ignore.case = TRUE)] <- "CMC"
+  sf[grepl("hat", sf, ignore.case = TRUE)] <- "hAT"
+  sf[grepl("pif|harbinger", sf, ignore.case = TRUE)] <- "PIF"
+  sf[grepl("tcmar|tc1|mariner", sf, ignore.case = TRUE)] <- "TcMar"
+  sf[grepl("zisupton", sf, ignore.case = TRUE)] <- "Zisupton"
+  sf[grepl("maverick|polinton", sf, ignore.case = TRUE)] <- "Maverick"
+  sf[grepl("crypton", sf, ignore.case = TRUE)] <- "Crypton"
+  sf[grepl("piggy", sf, ignore.case = TRUE)] <- "piggyBac"
+  sf[grepl("academ", sf, ignore.case = TRUE)] <- "Academ"
+
+  sf[grepl("^cr1$", sf, ignore.case = TRUE)] <- "CR1"
+  sf[grepl("^l1$", sf, ignore.case = TRUE)] <- "L1"
+  sf[grepl("^l2$", sf, ignore.case = TRUE)] <- "L2"
+  sf[grepl("^r2$", sf, ignore.case = TRUE)] <- "R2"
+  sf[grepl("^rex$", sf, ignore.case = TRUE)] <- "Rex"
+  sf[grepl("^rte$", sf, ignore.case = TRUE)] <- "RTE"
+  sf[grepl("jockey", sf, ignore.case = TRUE)] <- "Jockey"
+  sf[grepl("^i$|i-jockey", sf, ignore.case = TRUE)] <- "I-Jockey"
+  sf[grepl("tx1", sf, ignore.case = TRUE)] <- "Tx1"
+  sf[grepl("ingi", sf, ignore.case = TRUE)] <- "Ingi"
+
+  sf[grepl("dirs", sf, ignore.case = TRUE)] <- "DIRS"
+  sf[grepl("erv1", sf, ignore.case = TRUE)] <- "ERV1"
+  sf[grepl("ervl", sf, ignore.case = TRUE)] <- "ERVL"
+  sf[grepl("^erv$", sf, ignore.case = TRUE)] <- "ERV"
+  sf[grepl("gypsy", sf, ignore.case = TRUE)] <- "Gypsy"
+  sf[grepl("copia", sf, ignore.case = TRUE)] <- "Copia"
+  sf[grepl("pao|bel", sf, ignore.case = TRUE)] <- "Pao"
+
+  sf[grepl("trna|t-rna", sf, ignore.case = TRUE)] <- "tRNA"
+  sf[grepl("7sl", sf, ignore.case = TRUE)] <- "7SL"
+  sf[grepl("5s", sf, ignore.case = TRUE)] <- "5S"
+  sf[grepl("mir", sf, ignore.case = TRUE)] <- "MIR"
+  sf[grepl("^sine$", sf, ignore.case = TRUE)] <- "SINE"
+  sf[grepl("^alu$", sf, ignore.case = TRUE)] <- "Alu"
+  sf[grepl("^b2$", sf, ignore.case = TRUE)] <- "B2"
+  sf[grepl("^b4$", sf, ignore.case = TRUE)] <- "B4"
+
+  sf[grepl("^rc$|rolling|helitron", sf, ignore.case = TRUE)] <- "Helitron"
+  sf[grepl("^ple$|penelope", sf, ignore.case = TRUE)] <- "Penelope"
+
+  # If no explicit superfamily was found, use the broad Earl Grey class.
+  broad_fallback <- c(
+    DNA = "DNA", LINE = "LINE", LTR = "LTR", SINE = "SINE",
+    PLE = "Penelope", RC = "Helitron", Other = "Other", Unknown = "Unclassified"
+  )
+  use_fallback <- is.na(sf) | !nzchar(sf) | sf == "NA"
+  sf[use_fallback] <- unname(broad_fallback[broad[use_fallback]])
+  sf[is.na(sf) | !nzchar(sf)] <- "Unclassified"
+
+  sf
+}
+
+subclass_levels <- c("DNA", "LINE", "LTR", "SINE", "PLE", "RC", "Other", "Unknown")
+subclass_label_levels <- c(
+  "DNA Transposon", "LINE", "LTR Retrotransposon", "SINE",
+  "Penelope", "Rolling Circle", "Other", "Unknown"
 )
 
-theme_eg <- function(base_size = 11) {
+# Earl Grey native class colours. These reproduce autoLand.R/autoPie.R:
+# DNA=#E32017, Rolling Circle=#EE7C0E, Penelope=#7156A5,
+# LINE=#0098D4, SINE=#9B0056, LTR=#00782A,
+# Other=#F3A9BB, Unclassified=#A0A5A9, Non-Repeat=#000000.
+# Extra aliases are deliberately included so ggplot never falls back to grey
+# just because labels differ between Earl Grey tables, GFF fields, and enhanced plots.
+class_palette <- c(
+  "DNA" = "#E32017", "DNA Transposon" = "#E32017", "TIR" = "#E32017",
+  "Rolling Circle" = "#EE7C0E", "RC" = "#EE7C0E", "Helitron" = "#EE7C0E",
+  "Penelope" = "#7156A5", "PLE" = "#7156A5",
+  "LINE" = "#0098D4",
+  "SINE" = "#9B0056",
+  "LTR" = "#00782A", "LTR Retrotransposon" = "#00782A",
+  "Other (Simple Repeat, Microsatellite, RNA)" = "#F3A9BB",
+  "Other" = "#F3A9BB", "Other simple or low-complexity" = "#F3A9BB",
+  "Unclassified" = "#A0A5A9", "Unknown" = "#A0A5A9",
+  "Non-Repeat" = "#000000"
+)
+
+# Superfamily colours. The named superfamilies use related palettes within
+# each TE class, while broad fallback labels reuse Earl Grey native class colours.
+# Additional aliases are used for robust parsing of RepeatMasker/Earl Grey labels.
+superfamily_palette <- c(
+  "CMC" = "#FB8072", "hAT" = "#B3DE69", "PIF" = "#66C2A5", "TcMar" = "#00B0F6",
+  "Tc1" = "#00B0F6", "Tc1-Mariner" = "#00B0F6", "Zisupton" = "#E76BF3",
+  "Maverick" = "#FDB462", "Polinton" = "#FDB462", "Crypton" = "#FCCDE5",
+  "piggyBac" = "#BC80BD", "Academ" = "#CCEBC5", "DNA" = "#E32017", "DNA Transposon" = "#E32017",
+  "CR1" = "#084594", "L1" = "#2171B5", "L2" = "#4292C6", "LINE" = "#6BAED6",
+  "R2" = "#9ECAE1", "Rex" = "#C6DBEF", "RTE" = "#EFF3FF", "Jockey" = "#08519C",
+  "I" = "#3182BD", "I-Jockey" = "#3182BD", "Tx1" = "#BDD7E7", "Ingi" = "#6BAED6",
+  "DIRS" = "#005A32", "ERV" = "#238B45", "ERV1" = "#41AB5D", "ERVL" = "#74C476",
+  "Gypsy" = "#A1D99B", "Copia" = "#31A354", "LTR" = "#C7E9C0", "LTR Retrotransposon" = "#00782A",
+  "Pao" = "#EDF8E9", "BEL" = "#EDF8E9",
+  "SINE" = "#9B0056", "tRNA" = "#9B0056", "7SL" = "#C51B7D", "5S" = "#DE77AE", "MIR" = "#F1B6DA", "Alu" = "#8E0152", "B2" = "#C51B7D", "B4" = "#DE77AE",
+  "Penelope" = "#ECEAF7", "PLE" = "#7156A5",
+  "Helitron" = "#F6DFC8", "RC" = "#EE7C0E", "Rolling Circle" = "#EE7C0E",
+  "Other (Simple Repeat, Microsatellite, RNA)" = "#F3A9BB", "Other" = "#F3A9BB",
+  "Unclassified" = "#A0A5A9", "Unknown" = "#A0A5A9"
+)
+
+na_debug_color <- if (debug_palette) "#ff00ff" else "#bdbdbd"
+
+make_extra_palette <- function(labels, existing = character()) {
+  labels <- labels[!is.na(labels) & nzchar(labels)]
+  labels <- setdiff(sort(unique(labels)), existing)
+  if (length(labels) == 0) return(setNames(character(), character()))
+  cols <- if ("hcl.colors" %in% getNamespaceExports("grDevices")) {
+    grDevices::hcl.colors(length(labels), palette = "Dark 3")
+  } else {
+    grDevices::rainbow(length(labels), s = 0.65, v = 0.85)
+  }
+  names(cols) <- labels
+  cols
+}
+
+complete_palette <- function(values, palette, label = "palette") {
+  values <- sort(unique(as.character(values)))
+  values <- values[!is.na(values) & nzchar(values)]
+  missing <- setdiff(values, names(palette))
+  if (length(missing) > 0) {
+    warning("Adding automatic colours for ", label, ": ", paste(missing, collapse = ", "))
+    palette <- c(palette, make_extra_palette(missing, names(palette)))
+  }
+  palette
+}
+
+audit_palette <- function(values, palette, label, outdir) {
+  values <- sort(unique(as.character(values)))
+  values <- values[!is.na(values) & nzchar(values)]
+  missing <- setdiff(values, names(palette))
+  audit <- data.frame(
+    label = label,
+    value = values,
+    in_palette = values %in% names(palette),
+    stringsAsFactors = FALSE
+  )
+  utils::write.table(
+    audit,
+    file.path(outdir, paste0("palette_audit_", label, ".tsv")),
+    sep = "\t", row.names = FALSE, quote = FALSE
+  )
+  if (length(missing) > 0) {
+    warning("Missing palette colors for ", label, ": ", paste(missing, collapse = ", "))
+  }
+  invisible(missing)
+}
+
+standard_theme <- function(base_size = 11) {
+  ggplot2::theme_bw(base_size = base_size) +
+    ggplot2::theme(
+      panel.grid.minor = ggplot2::element_line(linewidth = 0.15, colour = "grey92"),
+      panel.grid.major = ggplot2::element_line(linewidth = 0.25, colour = "grey88"),
+      plot.title = ggplot2::element_text(hjust = 0.5),
+      legend.title = ggplot2::element_text(),
+      legend.key.size = if (has_grid) grid::unit(0.45, "cm") else ggplot2::rel(0.8),
+      strip.background = ggplot2::element_rect(fill = "grey86", colour = "grey45"),
+      strip.text = ggplot2::element_text()
+    )
+}
+
+enhanced_theme <- function(base_size = 11) {
   ggplot2::theme_bw(base_size = base_size) +
     ggplot2::theme(
       panel.grid.minor = ggplot2::element_blank(),
-      plot.title = ggplot2::element_text(face = "bold"),
-      legend.title = ggplot2::element_blank(),
-      strip.background = ggplot2::element_rect(fill = "grey92", colour = "grey70")
+      panel.grid.major = ggplot2::element_line(linewidth = 0.25, colour = "grey88"),
+      plot.title = ggplot2::element_text(hjust = 0.5, face = "bold"),
+      axis.title = ggplot2::element_text(face = "bold"),
+      legend.title = ggplot2::element_text(face = "bold"),
+      legend.key.size = if (has_grid) grid::unit(0.45, "cm") else ggplot2::rel(0.8),
+      strip.background = ggplot2::element_rect(fill = "grey86", colour = "grey45"),
+      strip.text = ggplot2::element_text(face = "bold")
     )
 }
 
 save_plot <- function(plot, stem, width = 9, height = 6) {
   outputs <- file.path(outdir, paste0(stem, c(".png", ".pdf", ".svg", ".vvg")))
   ggplot2::ggsave(outputs[[1]], plot = plot, width = width, height = height,
-                  units = "in", dpi = dpi)
+                  units = "in", dpi = dpi, limitsize = FALSE)
   ggplot2::ggsave(outputs[[2]], plot = plot, width = width, height = height,
-                  units = "in", device = grDevices::cairo_pdf)
+                  units = "in", device = grDevices::cairo_pdf, limitsize = FALSE)
   ggplot2::ggsave(outputs[[3]], plot = plot, width = width, height = height,
-                  units = "in", device = "svg", dpi = dpi)
+                  units = "in", device = "svg", dpi = dpi, limitsize = FALSE)
   ggplot2::ggsave(outputs[[4]], plot = plot, width = width, height = height,
-                  units = "in", device = "svg", dpi = dpi)
+                  units = "in", device = "svg", dpi = dpi, limitsize = FALSE)
   data.frame(plot = stem, file = outputs, stringsAsFactors = FALSE)
+}
+
+prepare_gff_landscape <- function(gff_file) {
+  if (is.na(gff_file) || !file.exists(gff_file) || file.info(gff_file)$size == 0) {
+    return(data.frame())
+  }
+  gff <- read_gff_minimal(gff_file)
+  if (nrow(gff) == 0) return(data.frame())
+  gff <- gff[grepl("kimura80=", gff$metadata, ignore.case = TRUE), , drop = FALSE]
+  if (nrow(gff) == 0) return(data.frame())
+
+  name_attr <- extract_attr(gff$metadata, "NAME")
+  te_type <- ifelse(!is.na(name_attr) & grepl("#", name_attr), sub("^.*#", "", name_attr), gff$repeat_class)
+
+  gff$kimura80 <- suppressWarnings(as.numeric(extract_attr(gff$metadata, "kimura80")))
+  gff$width_bp <- num_col(gff$end) - num_col(gff$start) + 1
+  gff$subclass <- subclass_abbrev(te_type)
+  gff$subclass_label <- subclass_label(te_type)
+  gff$superfamily <- superfamily_label(te_type, gff$repeat_class, gff$metadata)
+
+  gff <- gff[
+    is.finite(gff$kimura80) & gff$kimura80 >= 0 & gff$kimura80 <= max_kimura &
+      is.finite(gff$width_bp) & gff$width_bp > 0,
+    , drop = FALSE
+  ]
+  if (nrow(gff) == 0) return(data.frame())
+
+  gff$subclass <- factor(gff$subclass, levels = subclass_levels)
+  gff$subclass_label <- factor(gff$subclass_label, levels = subclass_label_levels)
+  gff
 }
 
 manifest <- data.frame(plot = character(), file = character(), stringsAsFactors = FALSE)
 
-high_file <- find_first(paste0("(^|/)", species, "\\.highLevelCount\\.txt$"),
-                        prefer = c("_summaryFiles"))
-family_file <- find_first(paste0("(^|/)", species, "\\.familyLevelCount\\.txt$"),
-                          prefer = c("_summaryFiles"))
-div_file <- find_first(paste0("(^|/)", species, "(_divergence_summary_table|_summary_table)\\.tsv$"),
-                       prefer = c("_summaryFiles", "_RepeatLandscape"))
-gff_file <- find_first(paste0("(^|/)", species, "\\.filteredRepeats\\.withDivergence\\.gff$"),
-                       prefer = c("_RepeatLandscape", "_summaryFiles", "looseMerge"))
+high_file <- find_first(paste0("(^|/)", species, "\\.highLevelCount\\.txt$"), prefer = c("_summaryFiles"))
+family_file <- find_first(paste0("(^|/)", species, "\\.familyLevelCount\\.txt$"), prefer = c("_summaryFiles"))
+div_file <- find_first(paste0("(^|/)", species, "(_divergence_summary_table|_summary_table)\\.tsv$"), prefer = c("_summaryFiles", "_RepeatLandscape"))
+gff_file <- find_first(paste0("(^|/)", species, "\\.filteredRepeats\\.withDivergence\\.gff$"), prefer = c("_RepeatLandscape", "_summaryFiles", "looseMerge"))
 if (is.na(gff_file)) {
-  gff_file <- find_first(paste0("(^|/)", species, "\\.filteredRepeats\\.gff$"),
-                         prefer = c("_summaryFiles", "looseMerge"))
+  gff_file <- find_first(paste0("(^|/)", species, "\\.filteredRepeats\\.gff$"), prefer = c("_summaryFiles", "looseMerge"))
 }
 
-if (!is.na(high_file)) {
+landscape_gff <- prepare_gff_landscape(gff_file)
+if (nrow(landscape_gff) > 0) {
+  class_palette <- complete_palette(c(landscape_gff$subclass_label, landscape_gff$subclass), class_palette, "TE subclass")
+  superfamily_palette <- complete_palette(landscape_gff$superfamily, superfamily_palette, "TE superfamily")
+  audit_palette(landscape_gff$subclass_label, class_palette, "subclass_label", outdir)
+  audit_palette(landscape_gff$subclass, class_palette, "subclass_abbrev", outdir)
+  audit_palette(landscape_gff$superfamily, superfamily_palette, "superfamily", outdir)
+}
+
+# ============================================================
+# Standard Earl Grey-like native plots
+# ============================================================
+if (make_standard && nrow(landscape_gff) > 0) {
+  p <- ggplot2::ggplot(landscape_gff, ggplot2::aes(x = kimura80, weight = width_bp, fill = subclass_label)) +
+    ggplot2::geom_histogram(binwidth = binwidth, boundary = 0, position = "stack", colour = NA) +
+    ggplot2::scale_x_reverse(limits = c(max_kimura, 0), expand = ggplot2::expansion(mult = c(0.01, 0.01))) +
+    ggplot2::scale_y_continuous(labels = label_bp, expand = ggplot2::expansion(mult = c(0, 0.04))) +
+    ggplot2::scale_fill_manual(values = class_palette, na.value = na_debug_color, drop = FALSE) +
+    ggplot2::labs(title = paste("Repeat landscape of", species), x = "Kimura 2-parameter distance", y = "Base pairs", fill = "TE subclass") +
+    standard_theme()
+  manifest <- rbind(manifest, save_plot(p, "standard_classification_landscape", 10, 6))
+
+  p <- ggplot2::ggplot(landscape_gff, ggplot2::aes(x = kimura80, weight = width_bp, fill = subclass_label)) +
+    ggplot2::geom_histogram(binwidth = binwidth, boundary = 0, colour = NA) +
+    ggplot2::facet_grid(subclass ~ ., scales = "free_y", switch = "y") +
+    ggplot2::scale_x_reverse(limits = c(max_kimura, 0), expand = ggplot2::expansion(mult = c(0.01, 0.01))) +
+    ggplot2::scale_y_continuous(labels = label_bp, expand = ggplot2::expansion(mult = c(0, 0.06))) +
+    ggplot2::scale_fill_manual(values = class_palette, na.value = na_debug_color, drop = FALSE) +
+    ggplot2::labs(title = paste("Repeat landscape of", species), x = "Kimura 2-parameter distance", y = "Base pairs", fill = "TE subclass") +
+    standard_theme(base_size = 9) +
+    ggplot2::theme(strip.placement = "outside")
+  manifest <- rbind(manifest, save_plot(p, "standard_split_class_landscape", 10, 8))
+
+  super_df <- landscape_gff[!is.na(landscape_gff$superfamily) & nzchar(as.character(landscape_gff$superfamily)), , drop = FALSE]
+  super_df$superfamily <- factor(
+    super_df$superfamily,
+    levels = c(names(superfamily_palette), setdiff(sort(unique(as.character(super_df$superfamily))), names(superfamily_palette)))
+  )
+
+  p <- ggplot2::ggplot(super_df, ggplot2::aes(x = kimura80, weight = width_bp, fill = superfamily)) +
+    ggplot2::geom_histogram(binwidth = binwidth, boundary = 0, position = "stack", colour = "grey25", linewidth = 0.10) +
+    ggplot2::facet_grid(subclass ~ ., scales = "free_y", switch = "y") +
+    ggplot2::scale_x_reverse(limits = c(max_kimura, 0), expand = ggplot2::expansion(mult = c(0.01, 0.01))) +
+    ggplot2::scale_y_continuous(labels = label_bp, expand = ggplot2::expansion(mult = c(0, 0.06))) +
+    ggplot2::scale_fill_manual(values = superfamily_palette, na.value = na_debug_color, drop = FALSE) +
+    ggplot2::guides(fill = ggplot2::guide_legend(ncol = 3, byrow = TRUE)) +
+    ggplot2::labs(title = paste("Repeat landscape of", species), x = "Kimura 2-parameter distance", y = "Base pairs", fill = "Superfamily") +
+    standard_theme(base_size = 9) +
+    ggplot2::theme(strip.placement = "outside", legend.position = "right")
+  manifest <- rbind(manifest, save_plot(p, "standard_superfamily_div_plot", 11, 8))
+}
+
+# Standard summary pie from high-level count
+if (make_standard && !is.na(high_file)) {
+  high <- read_tsv(high_file)
+  required <- c("TE Classification", "Coverage (bp)")
+  if (nrow(high) > 0 && all(required %in% names(high))) {
+    high$coverage_bp <- num_col(high[["Coverage (bp)"]])
+    high$class_base <- class_base(high[["TE Classification"]])
+    high$class_base[high[["TE Classification"]] == "Non-Repeat"] <- "Non-Repeat"
+    high$class_base[grepl("Total Interspersed Repeat", high[["TE Classification"]])] <- NA_character_
+    pie_df <- high[!is.na(high$class_base) & is.finite(high$coverage_bp) & high$coverage_bp > 0, , drop = FALSE]
+    pie_df <- stats::aggregate(coverage_bp ~ class_base, data = pie_df, sum, na.rm = TRUE)
+    pie_df$class_base <- factor(pie_df$class_base, levels = c("Non-Repeat", subclass_label_levels))
+    p <- ggplot2::ggplot(pie_df, ggplot2::aes(x = "", y = coverage_bp, fill = class_base)) +
+      ggplot2::geom_col(width = 1, colour = NA) +
+      ggplot2::coord_polar(theta = "y") +
+      ggplot2::scale_fill_manual(values = class_palette, na.value = na_debug_color, drop = FALSE) +
+      ggplot2::labs(fill = NULL) +
+      ggplot2::theme_void(base_size = 11) +
+      ggplot2::theme(legend.position = "right")
+    manifest <- rbind(manifest, save_plot(p, "standard_summaryPie", 8, 6))
+  }
+}
+
+# ============================================================
+# Enhanced summary/composition plots
+# ============================================================
+if (make_enhanced && !is.na(high_file)) {
   high <- read_tsv(high_file)
   required <- c("TE Classification", "Coverage (bp)", "Copy Number", "% Genome Coverage")
-  if (all(required %in% names(high))) {
+  if (nrow(high) > 0 && all(required %in% names(high))) {
     high$coverage_bp <- num_col(high[["Coverage (bp)"]])
     high$genome_pct <- num_col(high[["% Genome Coverage"]])
     high$copy_number_num <- num_col(high[["Copy Number"]])
     high$is_nested <- grepl("-nested$", high[["TE Classification"]])
     high$class_base <- class_base(high[["TE Classification"]])
-    high_plot <- high[!high[["TE Classification"]] %in% c("Total Interspersed Repeat", "Non-Repeat"), , drop = FALSE]
+    high$class_base[high[["TE Classification"]] == "Non-Repeat"] <- "Non-Repeat"
+    high$class_base[grepl("Total Interspersed Repeat", high[["TE Classification"]])] <- NA_character_
 
-    p_comp <- ggplot2::ggplot(high_plot,
-                              ggplot2::aes(x = stats::reorder(class_base, genome_pct),
-                                           y = genome_pct, fill = class_base)) +
+    high_plot <- high[!is.na(high$class_base) & is.finite(high$coverage_bp) & high$coverage_bp > 0, , drop = FALSE]
+    high_sum <- stats::aggregate(coverage_bp ~ class_base, data = high_plot, sum, na.rm = TRUE)
+    high_sum <- high_sum[order(-high_sum$coverage_bp), , drop = FALSE]
+    high_sum$fraction <- high_sum$coverage_bp / sum(high_sum$coverage_bp)
+    high_sum$percent <- 100 * high_sum$fraction
+    high_sum$label <- ifelse(high_sum$percent >= 2, paste0(high_sum$class_base, "\n", sprintf("%.1f%%", high_sum$percent)), "")
+    high_sum$class_base <- factor(high_sum$class_base, levels = c("Non-Repeat", subclass_label_levels))
+
+    p <- ggplot2::ggplot(high_sum, ggplot2::aes(x = 2, y = coverage_bp, fill = class_base)) +
+      ggplot2::geom_col(width = 1, colour = "white", linewidth = 0.25) +
+      ggplot2::coord_polar(theta = "y") +
+      ggplot2::xlim(0.5, 2.5) +
+      ggplot2::scale_fill_manual(values = class_palette, na.value = na_debug_color, drop = FALSE) +
+      ggplot2::geom_text(ggplot2::aes(label = label), position = ggplot2::position_stack(vjust = 0.5), size = 3, lineheight = 0.9, show.legend = FALSE) +
+      ggplot2::labs(title = paste("Genome fraction annotated by Earl Grey for", species), fill = "TE subclass") +
+      ggplot2::theme_void(base_size = 11) +
+      ggplot2::theme(plot.title = ggplot2::element_text(hjust = 0.5, face = "bold"), legend.title = ggplot2::element_text(face = "bold"), legend.position = "right")
+    manifest <- rbind(manifest, save_plot(p, "enhanced_summary_donut", 9, 6))
+
+    p <- ggplot2::ggplot(high_sum, ggplot2::aes(x = stats::reorder(as.character(class_base), percent), y = percent, fill = class_base)) +
       ggplot2::geom_col(width = 0.75) +
       ggplot2::coord_flip() +
-      ggplot2::scale_fill_manual(values = class_palette, na.value = "#bdbdbd") +
-      ggplot2::labs(title = paste(species, "EarlGrey repeat composition"),
-                    x = NULL, y = "Genome coverage (%)") +
-      theme_eg()
-    manifest <- rbind(manifest, save_plot(p_comp, "earlgrey_repeat_composition", 9, 5.5))
+      ggplot2::scale_fill_manual(values = class_palette, na.value = na_debug_color, drop = FALSE) +
+      ggplot2::labs(title = paste(species, "Earl Grey genome composition"), x = NULL, y = "Genome coverage (%)", fill = "TE subclass") +
+      enhanced_theme()
+    manifest <- rbind(manifest, save_plot(p, "enhanced_summary_composition_bar", 9, 5.5))
+    manifest <- rbind(manifest, save_plot(p, "earlgrey_repeat_composition", 9, 5.5))
 
     nested <- stats::aggregate(coverage_bp ~ class_base + is_nested, data = high_plot, sum, na.rm = TRUE)
+    nested <- nested[as.character(nested$class_base) != "Non-Repeat", , drop = FALSE]
     nested$nested_status <- ifelse(nested$is_nested, "Nested", "Non-nested")
-    p_nested <- ggplot2::ggplot(nested,
-                                ggplot2::aes(x = stats::reorder(class_base, coverage_bp),
-                                             y = coverage_bp / 1e6, fill = nested_status)) +
-      ggplot2::geom_col(width = 0.75) +
-      ggplot2::coord_flip() +
-      ggplot2::scale_fill_manual(values = c("Non-nested" = "#4d4d4d", "Nested" = "#d95f02")) +
-      ggplot2::labs(title = paste(species, "nested repeat burden"),
-                    x = NULL, y = "Coverage (Mb)") +
-      theme_eg()
-    manifest <- rbind(manifest, save_plot(p_nested, "earlgrey_nested_repeat_burden", 9, 5.5))
+    if (nrow(nested) > 0) {
+      p <- ggplot2::ggplot(nested, ggplot2::aes(x = stats::reorder(as.character(class_base), coverage_bp), y = coverage_bp / 1e6, fill = nested_status)) +
+        ggplot2::geom_col(width = 0.75) +
+        ggplot2::coord_flip() +
+        ggplot2::scale_fill_manual(values = c("Non-nested" = "#4d4d4d", "Nested" = "#d95f02")) +
+        ggplot2::labs(title = paste(species, "nested repeat burden"), x = NULL, y = "Coverage (Mb)", fill = NULL) +
+        enhanced_theme()
+      manifest <- rbind(manifest, save_plot(p, "enhanced_nested_repeat_burden", 9, 5.5))
+      manifest <- rbind(manifest, save_plot(p, "earlgrey_nested_repeat_burden", 9, 5.5))
+    }
   }
 }
 
-if (!is.na(family_file)) {
+# ============================================================
+# Enhanced family-level plots
+# ============================================================
+if (make_enhanced && !is.na(family_file)) {
   fam <- read_tsv(family_file)
-  if (all(c("TE Family", "Coverage (bp)", "Copy Number") %in% names(fam))) {
+  if (nrow(fam) > 0 && all(c("TE Family", "Coverage (bp)", "Copy Number") %in% names(fam))) {
     fam$coverage_bp <- num_col(fam[["Coverage (bp)"]])
     fam$copy_number_num <- num_col(fam[["Copy Number"]])
     fam$family <- sub("#.*$", "", fam[["TE Family"]])
@@ -3851,100 +4511,156 @@ if (!is.na(family_file)) {
     fam <- fam[order(-fam$coverage_bp), , drop = FALSE]
     top <- utils::head(fam, top_n)
 
-    p_top <- ggplot2::ggplot(top,
-                             ggplot2::aes(x = stats::reorder(family, coverage_bp),
-                                          y = coverage_bp / 1e6, fill = class_base)) +
+    p <- ggplot2::ggplot(top, ggplot2::aes(x = stats::reorder(family, coverage_bp), y = coverage_bp / 1e6, fill = class_base)) +
       ggplot2::geom_col(width = 0.75) +
       ggplot2::coord_flip() +
-      ggplot2::scale_fill_manual(values = class_palette, na.value = "#bdbdbd") +
-      ggplot2::labs(title = paste(species, "top TE families by coverage"),
-                    x = NULL, y = "Coverage (Mb)") +
-      theme_eg(base_size = 10)
-    manifest <- rbind(manifest, save_plot(p_top, "earlgrey_top_te_families", 10, 8))
+      ggplot2::scale_fill_manual(values = class_palette, na.value = na_debug_color, drop = FALSE) +
+      ggplot2::labs(title = paste(species, "top TE families by coverage"), x = NULL, y = "Coverage (Mb)", fill = "TE subclass") +
+      enhanced_theme(base_size = 10)
+    manifest <- rbind(manifest, save_plot(p, "enhanced_top_te_families", 10, 8))
+    manifest <- rbind(manifest, save_plot(p, "earlgrey_top_te_families", 10, 8))
 
     scatter <- fam[is.finite(fam$copy_number_num) & fam$copy_number_num > 0, , drop = FALSE]
     if (nrow(scatter) > 0) {
-      p_scatter <- ggplot2::ggplot(scatter,
-                                   ggplot2::aes(x = copy_number_num,
-                                                y = coverage_bp / 1e6,
-                                                colour = class_base)) +
+      p <- ggplot2::ggplot(scatter, ggplot2::aes(x = copy_number_num, y = coverage_bp / 1e6, colour = class_base)) +
         ggplot2::geom_point(alpha = 0.65, size = 1.8) +
         ggplot2::scale_x_log10() +
         ggplot2::scale_y_log10() +
-        ggplot2::scale_colour_manual(values = class_palette, na.value = "#bdbdbd") +
-        ggplot2::labs(title = paste(species, "TE family copy number versus coverage"),
-                      x = "Copy number (log10)", y = "Coverage, Mb (log10)") +
-        theme_eg()
-      manifest <- rbind(manifest, save_plot(p_scatter, "earlgrey_family_copy_vs_coverage", 8, 6))
+        ggplot2::scale_colour_manual(values = class_palette, na.value = na_debug_color, drop = FALSE) +
+        ggplot2::labs(title = paste(species, "TE family copy number versus coverage"), x = "Copy number (log10)", y = "Coverage, Mb (log10)", colour = "TE subclass") +
+        enhanced_theme()
+      manifest <- rbind(manifest, save_plot(p, "enhanced_family_copy_vs_coverage", 8, 6))
+      manifest <- rbind(manifest, save_plot(p, "earlgrey_family_copy_vs_coverage", 8, 6))
     }
   }
 }
 
-if (!is.na(div_file)) {
+# ============================================================
+# Enhanced Earl Grey landscape plots
+# ============================================================
+if (make_enhanced && nrow(landscape_gff) > 0) {
+  p <- ggplot2::ggplot(landscape_gff, ggplot2::aes(x = kimura80, weight = width_bp, fill = subclass_label)) +
+    ggplot2::geom_histogram(binwidth = binwidth, boundary = 0, position = "stack", colour = NA) +
+    ggplot2::scale_x_reverse(limits = c(max_kimura, 0), expand = ggplot2::expansion(mult = c(0.01, 0.01))) +
+    ggplot2::scale_y_continuous(labels = label_bp, expand = ggplot2::expansion(mult = c(0, 0.04))) +
+    ggplot2::scale_fill_manual(values = class_palette, na.value = na_debug_color, drop = FALSE) +
+    ggplot2::labs(title = paste("Repeat landscape of", species), x = "Kimura 2-parameter distance", y = "Base pairs", fill = "TE subclass") +
+    enhanced_theme()
+  manifest <- rbind(manifest, save_plot(p, "enhanced_classification_landscape", 10, 6))
+  manifest <- rbind(manifest, save_plot(p, "earlgrey_classification_landscape", 10, 6))
+  manifest <- rbind(manifest, save_plot(p, "earlgrey_classification_landscape_enhanced", 10, 6))
+
+  p <- ggplot2::ggplot(landscape_gff, ggplot2::aes(x = kimura80, weight = width_bp, fill = subclass_label)) +
+    ggplot2::geom_histogram(binwidth = binwidth, boundary = 0, colour = NA) +
+    ggplot2::facet_grid(subclass ~ ., scales = "free_y", switch = "y") +
+    ggplot2::scale_x_reverse(limits = c(max_kimura, 0), expand = ggplot2::expansion(mult = c(0.01, 0.01))) +
+    ggplot2::scale_y_continuous(labels = label_bp, expand = ggplot2::expansion(mult = c(0, 0.06))) +
+    ggplot2::scale_fill_manual(values = class_palette, na.value = na_debug_color, drop = FALSE) +
+    ggplot2::labs(title = paste("Split repeat landscape of", species), x = "Kimura 2-parameter distance", y = "Base pairs", fill = "TE subclass") +
+    enhanced_theme(base_size = 9) +
+    ggplot2::theme(strip.placement = "outside")
+  manifest <- rbind(manifest, save_plot(p, "enhanced_split_class_landscape", 10, 8))
+  manifest <- rbind(manifest, save_plot(p, "earlgrey_split_class_landscape_enhanced", 10, 8))
+
+  super_df <- landscape_gff[!is.na(landscape_gff$superfamily) & nzchar(as.character(landscape_gff$superfamily)), , drop = FALSE]
+  super_df$superfamily <- factor(
+    super_df$superfamily,
+    levels = c(names(superfamily_palette), setdiff(sort(unique(as.character(super_df$superfamily))), names(superfamily_palette)))
+  )
+
+  if (nrow(super_df) > 0) {
+    p <- ggplot2::ggplot(super_df, ggplot2::aes(x = kimura80, weight = width_bp, fill = superfamily)) +
+      ggplot2::geom_histogram(binwidth = binwidth, boundary = 0, position = "stack", colour = "grey25", linewidth = 0.12) +
+      ggplot2::facet_grid(subclass ~ ., scales = "free_y", switch = "y") +
+      ggplot2::scale_x_reverse(limits = c(max_kimura, 0), expand = ggplot2::expansion(mult = c(0.01, 0.01))) +
+      ggplot2::scale_y_continuous(labels = label_bp, expand = ggplot2::expansion(mult = c(0, 0.06))) +
+      ggplot2::scale_fill_manual(values = superfamily_palette, na.value = na_debug_color, drop = FALSE) +
+      ggplot2::guides(fill = ggplot2::guide_legend(ncol = 3, byrow = TRUE)) +
+      ggplot2::labs(title = paste("Superfamily repeat landscape of", species), x = "Kimura 2-parameter distance", y = "Base pairs", fill = "Superfamily") +
+      enhanced_theme(base_size = 9) +
+      ggplot2::theme(strip.placement = "outside", legend.position = "right")
+    manifest <- rbind(manifest, save_plot(p, "enhanced_superfamily_divergence_landscape", 11, 8))
+    manifest <- rbind(manifest, save_plot(p, "earlgrey_superfamily_divergence_landscape_enhanced", 11, 8))
+  }
+
+  p <- ggplot2::ggplot(landscape_gff, ggplot2::aes(x = kimura80, weight = width_bp, fill = subclass_label)) +
+    ggplot2::geom_histogram(binwidth = binwidth, position = "identity", alpha = 0.75, boundary = 0) +
+    ggplot2::facet_wrap(stats::as.formula("~ subclass_label"), scales = "free_y") +
+    ggplot2::scale_x_reverse(limits = c(max_kimura, 0), expand = ggplot2::expansion(mult = c(0.01, 0.01))) +
+    ggplot2::scale_y_continuous(labels = label_bp) +
+    ggplot2::scale_fill_manual(values = class_palette, na.value = na_debug_color, drop = FALSE) +
+    ggplot2::labs(title = paste(species, "Kimura repeat landscape"), x = "Kimura 2-parameter distance", y = "Repeat bp", fill = "TE subclass") +
+    enhanced_theme(base_size = 10)
+  manifest <- rbind(manifest, save_plot(p, "enhanced_kimura_landscape", 10, 7))
+  manifest <- rbind(manifest, save_plot(p, "earlgrey_kimura_landscape", 10, 7))
+}
+
+# ============================================================
+# Enhanced divergence summary scatter from Earl Grey summary table
+# ============================================================
+if (make_enhanced && !is.na(div_file)) {
   div <- read_tsv(div_file)
-  if (all(c("subclass", "superfamily", "family", "total_bp", "mean_div") %in% names(div))) {
+  if (nrow(div) > 0 && all(c("subclass", "superfamily", "family", "total_bp", "mean_div") %in% names(div))) {
     div$total_bp <- num_col(div$total_bp)
     div$mean_div <- num_col(div$mean_div)
     div <- div[is.finite(div$total_bp) & is.finite(div$mean_div) & div$total_bp > 0, , drop = FALSE]
     div$class_base <- class_base(div$subclass)
+    div$class_base <- factor(div$class_base, levels = subclass_label_levels)
     if (nrow(div) > 0) {
-      p_div <- ggplot2::ggplot(div,
-                               ggplot2::aes(x = mean_div, y = total_bp / 1e6,
-                                            colour = class_base)) +
+      audit_palette(div$class_base, class_palette, "divergence_class_base", outdir)
+      p <- ggplot2::ggplot(div, ggplot2::aes(x = mean_div, y = total_bp / 1e6, colour = class_base)) +
         ggplot2::geom_point(alpha = 0.7, size = 1.8) +
         ggplot2::facet_wrap(stats::as.formula("~ class_base"), scales = "free_y") +
-        ggplot2::scale_colour_manual(values = class_palette, na.value = "#bdbdbd") +
-        ggplot2::labs(title = paste(species, "family-level Kimura divergence"),
-                      x = "Mean Kimura 2-parameter distance", y = "Family coverage (Mb)") +
-        theme_eg(base_size = 10)
-      manifest <- rbind(manifest, save_plot(p_div, "earlgrey_family_divergence", 10, 7))
-    }
-  }
-}
-
-if (!is.na(gff_file)) {
-  gff <- utils::read.delim(gff_file, sep = "\t", header = FALSE, quote = "",
-                           comment.char = "", fill = TRUE, stringsAsFactors = FALSE,
-                           col.names = paste0("V", seq_len(9)))
-  gff <- gff[ncol(gff) >= 9 & grepl("kimura80=", gff$V9, ignore.case = TRUE), , drop = FALSE]
-  if (nrow(gff) > 0) {
-    gff$class_base <- class_base(gff$V3)
-    gff$kimura80 <- suppressWarnings(as.numeric(extract_attr(gff$V9, "kimura80")))
-    gff$width_bp <- num_col(gff$V5) - num_col(gff$V4) + 1
-    gff <- gff[is.finite(gff$kimura80) & gff$kimura80 >= 0 & gff$kimura80 <= 0.6 &
-                 is.finite(gff$width_bp) & gff$width_bp > 0, , drop = FALSE]
-    if (nrow(gff) > 0) {
-      p_kimura <- ggplot2::ggplot(gff,
-                                  ggplot2::aes(x = kimura80, weight = width_bp,
-                                               fill = class_base)) +
-        ggplot2::geom_histogram(binwidth = 0.01, position = "identity", alpha = 0.65,
-                                boundary = 0) +
-        ggplot2::facet_wrap(stats::as.formula("~ class_base"), scales = "free_y") +
-        ggplot2::scale_fill_manual(values = class_palette, na.value = "#bdbdbd") +
-        ggplot2::labs(title = paste(species, "Kimura repeat landscape"),
-                      x = "Kimura 2-parameter distance", y = "Repeat bp") +
-        theme_eg(base_size = 10)
-      manifest <- rbind(manifest, save_plot(p_kimura, "earlgrey_kimura_landscape", 10, 7))
+        ggplot2::scale_colour_manual(values = class_palette, na.value = na_debug_color, drop = FALSE) +
+        ggplot2::labs(title = paste(species, "family-level Kimura divergence"), x = "Mean Kimura 2-parameter distance", y = "Family coverage (Mb)", colour = "TE subclass") +
+        enhanced_theme(base_size = 10)
+      manifest <- rbind(manifest, save_plot(p, "enhanced_family_divergence", 10, 7))
+      manifest <- rbind(manifest, save_plot(p, "earlgrey_family_divergence", 10, 7))
     }
   }
 }
 
 if (nrow(manifest) == 0) {
-  stop("No enhanced EarlGrey plots were created; required input files were missing or empty")
+  stop("No Earl Grey plots were created; required input files were missing, empty, or unreadable")
 }
 
-utils::write.table(manifest, file.path(outdir, "earlgrey_enhanced_plots_manifest.tsv"),
-                   sep = "\t", row.names = FALSE, quote = FALSE)
+utils::write.table(
+  manifest,
+  file.path(outdir, "earlgrey_standard_enhanced_plots_manifest.tsv"),
+  sep = "\t", row.names = FALSE, quote = FALSE
+)
+
+# Backward-compatible manifest name expected by earlier Bash pipeline versions.
+utils::write.table(
+  manifest,
+  file.path(outdir, "earlgrey_enhanced_plots_manifest.tsv"),
+  sep = "\t", row.names = FALSE, quote = FALSE
+)
 
 input_manifest <- data.frame(
-  key = c("species", "earlgrey_dir", "high_level_count", "family_level_count",
-          "divergence_summary", "gff_with_kimura", "dpi", "top_families"),
-  value = c(species, earlgrey_dir, high_file, family_file, div_file, gff_file,
-            as.character(dpi), as.character(top_n)),
+  key = c(
+    "species", "earlgrey_dir", "high_level_count", "family_level_count",
+    "divergence_summary", "gff_with_kimura", "outdir", "dpi", "top_families",
+    "binwidth", "max_kimura", "standard", "enhanced", "debug_palette",
+    "data_table_available", "scales_available"
+  ),
+  value = c(
+    species, earlgrey_dir, high_file, family_file, div_file, gff_file,
+    outdir, as.character(dpi), as.character(top_n), as.character(binwidth),
+    as.character(max_kimura), as.character(make_standard), as.character(make_enhanced),
+    as.character(debug_palette), as.character(has_data_table), as.character(has_scales)
+  ),
   stringsAsFactors = FALSE
 )
-utils::write.table(input_manifest, file.path(outdir, "earlgrey_enhanced_plots_inputs.tsv"),
-                   sep = "\t", row.names = FALSE, quote = FALSE)
+utils::write.table(
+  input_manifest,
+  file.path(outdir, "earlgrey_standard_enhanced_plots_inputs.tsv"),
+  sep = "\t", row.names = FALSE, quote = FALSE
+)
+
+message("Created ", nrow(manifest), " plot files in: ", outdir)
+message("Input manifest: ", file.path(outdir, "earlgrey_standard_enhanced_plots_inputs.tsv"))
+message("Plot manifest: ", file.path(outdir, "earlgrey_standard_enhanced_plots_manifest.tsv"))
 RSCRIPT
 
   chmod +x "$script_path"
@@ -3966,6 +4682,14 @@ validate_yes_no EARLGREY_REMOVE_SHORT "$EARLGREY_REMOVE_SHORT"
 validate_yes_no EARLGREY_SOFTMASK "$EARLGREY_SOFTMASK"
 validate_yes_no EARLGREY_HELIANO "$EARLGREY_HELIANO"
 check_toggle EARLGREY_ENHANCED_PLOTS "$EARLGREY_ENHANCED_PLOTS"
+check_toggle EARLGREY_ARCHIVE_INCOMPLETE "$EARLGREY_ARCHIVE_INCOMPLETE"
+case "$EARLGREY_INCOMPLETE_POLICY" in
+  resume|archive|error) ;;
+  *)
+    echo "[ERROR] Invalid EARLGREY_INCOMPLETE_POLICY=$EARLGREY_INCOMPLETE_POLICY. Use resume, archive, or error." >&2
+    exit 1
+    ;;
+esac
 
 if ! [[ "$EARLGREY_PLOT_DPI" =~ ^[0-9]+$ ]] || [[ "$EARLGREY_PLOT_DPI" -lt 1 ]]; then
   echo "[ERROR] Invalid EARLGREY_PLOT_DPI=$EARLGREY_PLOT_DPI. Use a positive integer." >&2
@@ -4161,14 +4885,39 @@ echo "[INFO] Running repeat annotation preflight checks"
   if ! { repeat_checkpoint_ready earlgrey; }; then
     echo "[INFO] Auditing Earl Grey environment"
 
-    env_run "$ENV_EARLGREY" bash -lc '
+    env_run_clean_r "$ENV_EARLGREY" bash -lc '
       set -Eeuo pipefail
 
       command -v earlGreyAnnotationOnly >/dev/null 2>&1 || {
         echo "[ERROR] earlGreyAnnotationOnly not found in environment." >&2
         exit 1
       }
-    '
+
+      command -v Rscript >/dev/null 2>&1 || {
+        echo "[ERROR] Rscript not found in Earl Grey environment." >&2
+        exit 1
+      }
+
+      Rscript --vanilla -e '\''
+        required <- c("GenomeInfoDb", "GenomeInfoDbData", "data.table", "rtracklayer", "Biostrings", "GenomicRanges", "IRanges", "S4Vectors")
+        missing <- required[!vapply(required, requireNamespace, logical(1), quietly = TRUE)]
+        if (length(missing)) {
+          stop("Missing/unloadable Earl Grey R package(s): ", paste(missing, collapse = ", "))
+        }
+        suppressPackageStartupMessages(library(GenomeInfoDb))
+        suppressPackageStartupMessages(library(GenomeInfoDbData))
+        cat("Earl Grey R/Bioconductor dependency check OK\\n")
+      '\''
+    ' \
+      > "${DIR_LOGS}/05_earlgrey_annotation_only.env_preflight.log" \
+      2>&1 \
+      || {
+        echo "[ERROR] Earl Grey environment preflight failed." >&2
+        echo "[ERROR] Check: ${DIR_LOGS}/05_earlgrey_annotation_only.env_preflight.log" >&2
+        echo "[ERROR] Suggested fix:" >&2
+        echo "        mamba install -n ${ENV_EARLGREY} -c conda-forge -c bioconda bioconductor-genomeinfodbdata bioconductor-genomeinfodb bioconductor-rtracklayer bioconductor-biostrings bioconductor-genomicranges bioconductor-iranges bioconductor-s4vectors r-data.table" >&2
+        exit 1
+      }
   fi
 
   if is_true "$EARLGREY_ENHANCED_PLOTS" && ! { repeat_checkpoint_ready earlgrey_plots; }; then
@@ -4718,6 +5467,7 @@ fi
 
 if repeat_checkpoint_ready earlgrey; then
     echo "[INFO] Step 5: existing Earl Grey outputs found; skipping Earl Grey"
+    audit_earlgrey_outputs
   else
     echo "[INFO] Step 5: Running Earl Grey annotation-only"
 
@@ -4747,11 +5497,27 @@ if repeat_checkpoint_ready earlgrey; then
     echo
   } > "${DIR_LOGS}/05_earlgrey_annotation_only.command.sh"
 
-  env_run "$ENV_EARLGREY" \
+  prepare_earlgrey_output_dir
+
+  env_run_clean_r "$ENV_EARLGREY" \
     earlGreyAnnotationOnly "${EARLGREY_ARGS[@]}" \
     > "${DIR_LOGS}/05_earlgrey_annotation_only.log" \
     2>&1
 
+  earlgrey_core_outputs_complete || {
+    echo "[ERROR] Earl Grey finished without required final outputs." >&2
+    echo "[ERROR] Required final outputs include:" >&2
+    echo "        ${DIR_EARLGREY}/${SPECIES}_EarlGrey/${SPECIES}_summaryFiles/${SPECIES}.filteredRepeats.bed" >&2
+    echo "        ${DIR_EARLGREY}/${SPECIES}_EarlGrey/${SPECIES}_summaryFiles/${SPECIES}.filteredRepeats.gff" >&2
+    echo "        ${DIR_EARLGREY}/${SPECIES}_EarlGrey/${SPECIES}_summaryFiles/${SPECIES}.highLevelCount.txt" >&2
+    echo "        ${DIR_EARLGREY}/${SPECIES}_EarlGrey/${SPECIES}_summaryFiles/${SPECIES}.familyLevelCount.txt" >&2
+    echo "        ${DIR_EARLGREY}/${SPECIES}_EarlGrey/${SPECIES}_summaryFiles/${SPECIES}_divergence_summary_table.tsv" >&2
+    echo "        ${DIR_EARLGREY}/${SPECIES}_EarlGrey/${SPECIES}_RepeatLandscape/${SPECIES}.filteredRepeats.withDivergence.gff" >&2
+    echo "[ERROR] Check log: ${DIR_LOGS}/05_earlgrey_annotation_only.log" >&2
+    exit 1
+  }
+
+  audit_earlgrey_outputs
   repeat_mark_checkpoint earlgrey
 fi
 
@@ -4760,6 +5526,12 @@ fi
 # ============================================================
 
 if is_true "$EARLGREY_ENHANCED_PLOTS"; then
+  if ! earlgrey_core_outputs_complete; then
+    echo "[ERROR] Earl Grey final outputs are incomplete; refusing to create enhanced plots." >&2
+    echo "[ERROR] Rerun Step 5 after archiving stale ${DIR_EARLGREY} outputs." >&2
+    exit 1
+  fi
+
   if repeat_checkpoint_ready earlgrey_plots; then
     echo "[INFO] Step 6: existing Earl Grey enhanced plots found; skipping"
   else
@@ -4798,6 +5570,12 @@ if repeat_checkpoint_ready collect_outputs; then
     echo "[INFO] Step 7: existing collected repeat outputs found; skipping collection"
   else
   echo "[INFO] Step 7: Collecting final outputs"
+
+  if ! earlgrey_core_outputs_complete; then
+    echo "[ERROR] Earl Grey final outputs are incomplete; refusing to collect final outputs." >&2
+    echo "[ERROR] Rerun Step 5 after archiving stale ${DIR_EARLGREY} outputs." >&2
+    exit 1
+  fi
 
   mkdir -p \
     "$DIR_FINAL/known_libraries" \
@@ -4987,9 +5765,9 @@ if repeat_checkpoint_ready collect_outputs; then
 	fi
 
 	  echo "[INFO] Step 8 complete. Repeat outputs: ${DIR_FINAL}"
-	fi
 
-# ============================================================================================================================
+fi
+
 # STEP 9: Final Summary & Run Report — execution stats, resources, key metrics, artifacts
 # Produces:
 #   - ${dir7}/run_summary.txt

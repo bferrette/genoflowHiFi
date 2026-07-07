@@ -30,101 +30,13 @@ From: ubuntu:24.04
     set -eux
     export DEBIAN_FRONTEND=noninteractive
 
-    # Robust downloader: atomic .part output, resume, stalled-transfer detection, curl -> wget fallback.
+    # Robust downloader: try curl (HTTP/1.1, retries), then wget as fallback (POSIX sh-compatible)
     fetch() {
-      url="$1"
-      out="$2"
-
-      if [ -z "${url}" ] || [ -z "${out}" ]; then
-        echo "[ERROR] fetch requires URL and output path" >&2
-        return 2
-      fi
-
-      outdir="$(dirname "${out}")"
-      mkdir -p "${outdir}"
-
-      tmp="${out}.part"
-
-      # Remove invalid empty partial files, but preserve non-empty partials for resume.
-      if [ -e "${tmp}" ] && [ ! -s "${tmp}" ]; then
-        rm -f "${tmp}"
-      fi
-
-      echo "[INFO] Downloading: ${url}" >&2
-      echo "[INFO] Output     : ${out}" >&2
-
-      # curl first: resume support, retries, timeout, low-speed protection, HTTP/1.1.
-      if curl \
-          --fail \
-          --location \
-          --continue-at - \
-          --retry 10 \
-          --retry-all-errors \
-          --retry-delay 5 \
-          --connect-timeout 30 \
-          --max-time 0 \
-          --speed-time 60 \
-          --speed-limit 1024 \
-          --http1.1 \
-          --output "${tmp}" \
-          "${url}"
-      then
-        if [ ! -s "${tmp}" ]; then
-          echo "[ERROR] Download produced an empty file: ${tmp}" >&2
-          return 1
-        fi
-        mv -f "${tmp}" "${out}"
+      url="$1"; out="$2"
+      if curl -fL --http1.1 --retry 6 --retry-all-errors --connect-timeout 20 --max-time 600 -o "$out" "$url"; then
         return 0
       fi
-
-      echo "[WARN] curl failed; retrying with wget" >&2
-
-      # wget fallback: continue partial downloads and retry transient failures.
-      if wget \
-          --continue \
-          --tries=5 \
-          --timeout=30 \
-          --waitretry=5 \
-          --retry-connrefused \
-          --output-document="${tmp}" \
-          "${url}"
-      then
-        if [ ! -s "${tmp}" ]; then
-          echo "[ERROR] Download produced an empty file: ${tmp}" >&2
-          return 1
-        fi
-        mv -f "${tmp}" "${out}"
-        return 0
-      fi
-
-      echo "[ERROR] Failed to download: ${url}" >&2
-      rm -f "${tmp}"
-      return 1
-    }
-
-    # Optional checksum wrapper. Use only when a trusted SHA256 is available upstream.
-    fetch_with_sha256() {
-      url="$1"
-      out="$2"
-      expected_sha256="$3"
-
-      if [ -z "${expected_sha256}" ]; then
-        echo "[ERROR] fetch_with_sha256 requires an expected SHA256" >&2
-        return 2
-      fi
-
-      fetch "${url}" "${out}"
-
-      actual_sha256="$(sha256sum "${out}" | awk '{print $1}')"
-      if [ "${actual_sha256}" != "${expected_sha256}" ]; then
-        echo "[ERROR] SHA256 mismatch for ${out}" >&2
-        echo "[ERROR] Expected: ${expected_sha256}" >&2
-        echo "[ERROR] Observed : ${actual_sha256}" >&2
-        rm -f "${out}"
-        return 1
-      fi
-
-      echo "[INFO] SHA256 verified: ${out}" >&2
+      wget -O "$out" --tries=3 --timeout=30 --waitretry=5 "$url"
     }
 
     # --- Base OS & essentials + R stack ---
@@ -145,7 +57,6 @@ From: ubuntu:24.04
       r-cran-getopt r-cran-gplots r-cran-optparse r-cran-backports \
       libcairo2-dev libxt-dev \
       libsqlite3-dev tk-dev uuid-dev libgdbm-dev
-    apt-get upgrade -y
     rm -rf /var/lib/apt/lists/*
 
     # --- R package from source: gsalib 2.2.1 ---
@@ -173,12 +84,12 @@ From: ubuntu:24.04
 
     # Core scientific + bio stack (PyVCF3 is the maintained fork; import module name is 'vcf')
     /opt/gatk-venv/bin/pip install --no-cache-dir \
-      numpy scipy scikit-learn matplotlib pandas biopython PyVCF3 pysam --upgrade
+      numpy scipy scikit-learn matplotlib pandas biopython PyVCF3 pysam
 
     # ML / ProbProg (CPU-only to keep image portable)
-    /opt/gatk-venv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch --upgrade
-    /opt/gatk-venv/bin/pip install --no-cache-dir keras --upgrade
-    /opt/gatk-venv/bin/pip install --no-cache-dir pymc --upgrade
+    /opt/gatk-venv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
+    /opt/gatk-venv/bin/pip install --no-cache-dir keras
+    /opt/gatk-venv/bin/pip install --no-cache-dir pymc
 
     # --- GATK 4.6.2.0 (release bundle) ---
     mkdir -p /opt && cd /opt
@@ -253,52 +164,26 @@ From: ubuntu:24.04
 %test
     set -eux
 
-    # Make all home/cache/data writes go to /tmp for build-time tests.
+    # Make all "home/cache/data" writes go to /tmp for build-time tests
     export HOME=/tmp
     export XDG_CACHE_HOME=/tmp/xdg-cache
     export XDG_CONFIG_HOME=/tmp/xdg-config
     export XDG_DATA_HOME=/tmp/xdg-data
     export ARVIZ_DATA=/tmp/arviz_data
     export MPLCONFIGDIR=/tmp/matplotlib
-    export KERAS_BACKEND=torch
 
-    mkdir -p \
-      /tmp/matplotlib \
-      /tmp/arviz_data \
-      /tmp/xdg-cache \
-      /tmp/xdg-config \
-      /tmp/xdg-data
+    mkdir -p /tmp/matplotlib /tmp/arviz_data /tmp/xdg-cache /tmp/xdg-config /tmp/xdg-data
 
     java -version
     gatk --version
-
-    /opt/gatk-venv/bin/python -c "import sys; print(sys.version)"
-
-    /opt/gatk-venv/bin/python - <<'PY'
-import numpy
-import scipy
-import sklearn
-import matplotlib
-import pandas
-import pysam
-import torch
-import keras
-import pymc
+    python -c "import sys; print(sys.version)"
+    python - <<'PY'
+import numpy, scipy, sklearn, matplotlib, pandas, pysam, torch, keras, pymc
 from Bio import SeqIO
 import vcf
-
 print("OK: PyVCF3 module 'vcf' loaded")
 print("OK: numpy", numpy.__version__)
-print("OK: scipy", scipy.__version__)
-print("OK: sklearn", sklearn.__version__)
-print("OK: matplotlib", matplotlib.__version__)
-print("OK: pandas", pandas.__version__)
-print("OK: pysam", pysam.__version__)
-print("OK: torch", torch.__version__)
-print("OK: keras", keras.__version__)
-print("OK: pymc", pymc.__version__)
 PY
-
     samtools --version | head -n 1
     bcftools --version | head -n 1
     bedtools --version

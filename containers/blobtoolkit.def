@@ -3,220 +3,87 @@ From: ubuntu:24.04
 
 %labels
   Maintainer Bruno Ferrette
-  Description BlobToolKit CLI with host support, standalone API/Viewer, Firefox, Chrome/Chromedriver, Geckodriver, and Xvfb on Ubuntu 24.04
-  Created 2026-05-25
+  Description BlobToolKit (BlobTools2 CLI + headless viewer) on Ubuntu 24.04, Python 3.9, pinned Firefox+Geckodriver, Chrome+Chromedriver, Xvfb, with bundled API/Viewer binaries
+  Created 2025-10-02
   URL https://blobtoolkit.genomehubs.org/
 
 %help
-  BlobToolKit Singularity/Apptainer image.
+  BlobToolKit Singularity/Apptainer image with Python 3.9 and a headless browser stack.
 
-  CONTENTS:
-    - Ubuntu 24.04 base
-    - Python virtual environment at /opt/venv
-    - BlobToolKit installed with pip
-    - blobtoolkit[host]==4.5.1 for blobtools host/view support
-    - blobtoolkit-pipeline==4.5.1 installed explicitly
-    - Standalone BlobToolKit API binary at /usr/local/bin/blobtoolkit-api
-    - Standalone BlobToolKit Viewer binary at /usr/local/bin/blobtoolkit-viewer
-    - Viewer/API launcher at /usr/local/bin/start-viewer-api
-    - Mozilla Firefox installed from Mozilla official APT repository
-    - Geckodriver v0.36.0 installed manually
-    - Google Chrome Stable installed from Google APT repository
-    - Matching Chromedriver installed from Chrome for Testing
-    - Xvfb and browser runtime libraries for headless rendering
+  # Content
+  - Python 3.9.21 built from source under /opt/python-3.9.21
+  - Virtualenv at /opt/py39 (PEP 668 friendly)
+  - blobtoolkit[full] (latest 4.x) in /opt/py39
+  - Firefox (Mozilla official APT) + geckodriver v0.36.0
+  - Google Chrome Stable + matching chromedriver
+  - Xvfb + basic GL/GTK/NSS libs for headless rendering
+  - **Standalone BlobToolKit API & Viewer binaries** installed into /usr/local/bin
+  - Default Viewer/API config at /opt/blobtoolkit/conf/.env and launcher /opt/blobtoolkit/bin/start-viewer-api
 
-  QUICK TEST:
-    apptainer exec blobtoolkit.sif python --version
-    apptainer exec blobtoolkit.sif blobtools --version
-    apptainer exec blobtoolkit.sif blobtools host --help
-    apptainer exec blobtoolkit.sif command -v blobtoolkit-api
-    apptainer exec blobtoolkit.sif command -v blobtoolkit-viewer
-    apptainer exec blobtoolkit.sif firefox --version
-    apptainer exec blobtoolkit.sif geckodriver --version
-    apptainer exec blobtoolkit.sif google-chrome --version
-    apptainer exec blobtoolkit.sif chromedriver --version
+  QUICK START (interactive viewer for a single BlobDir)
+    apptainer exec -B /path/to/BlobDirs:/data this.sif \
+      bash -lc "blobtools view --interactive /data/my_blobdir"
+    # If accessing from a remote host, forward ports 8000 (API) and 8080 (Viewer)
 
-  HEADLESS SNAIL PLOT WITH CHROMIUM:
-    apptainer exec \
-      -B /path/to/blobtoolkit:/data \
-      blobtoolkit.sif \
-      xvfb-run -a blobtools view \
-        --driver chromium \
-        --view snail \
-        --format svg \
-        --out /data/out \
-        /data/blobdir
+  QUICK START (export plot SVG/PNG headlessly)
+    apptainer exec -B /path/to/BlobDirs:/data this.sif \
+      bash -lc "xvfb-run -a blobtools view --driver firefox --view snail --format svg --out /data/out /data/my_blobdir"
 
-  HEADLESS SNAIL PLOT WITH FIREFOX:
-    apptainer exec \
-      -B /path/to/blobtoolkit:/data \
-      blobtoolkit.sif \
-      xvfb-run -a blobtools view \
-        --driver firefox \
-        --view snail \
-        --format svg \
-        --out /data/out \
-        /data/blobdir
+  ADVANCED (run Viewer+API explicitly with .env)
+    apptainer exec -B /path/to/BlobDirs:/blobtoolkit/datasets this.sif \
+      bash -lc "/opt/blobtoolkit/bin/start-viewer-api"
+    # Then visit http://localhost:8080/view/all (API on 8000)
 
-  START VIEWER/API DIRECTLY:
-    apptainer exec \
-      -B /path/to/blobtoolkit/datasets:/blobtoolkit/datasets \
-      blobtoolkit.sif \
-      start-viewer-api
-
-    Open:
-      http://localhost:8001/view/all
-
-  CUSTOM PORTS:
-    apptainer exec \
-      -B /path/to/blobtoolkit/datasets:/blobtoolkit/datasets \
-      blobtoolkit.sif \
-      bash -lc 'BTK_API_PORT=8880 BTK_PORT=8881 start-viewer-api'
-
-    Open:
-      http://localhost:8881/view/all
-
-  REMOTE SERVER:
-    ssh -L 8881:localhost:8881 -L 8880:localhost:8880 user@server
-
-    On the server:
-      apptainer exec \
-        -B /path/to/blobtoolkit/datasets:/blobtoolkit/datasets \
-        blobtoolkit.sif \
-        bash -lc 'BTK_API_PORT=8880 BTK_PORT=8881 start-viewer-api'
+  NOTES
+  - Newer BlobToolKit pip releases no longer bundle the Viewer/API; this image installs the official standalone binaries and puts them on PATH so 'blobtools view' can find them.
+  - Mount your datasets under /blobtoolkit/datasets or adjust /opt/blobtoolkit/conf/.env.
 
 %environment
   export LANG=en_US.UTF-8
   export LANGUAGE=en_US:en
   export LC_ALL=en_US.UTF-8
-
-  export PATH=/opt/venv/bin:/usr/local/bin:/opt/blobtoolkit/bin:$PATH
-
+  export PATH=/opt/py39/bin:/usr/local/bin:$PATH
   export BROWSER=firefox
   export FIREFOX_BIN=/usr/local/bin/firefox
   export GECKODRIVER_BIN=/usr/local/bin/geckodriver
-
   export CHROME_BIN=/usr/bin/google-chrome-stable
   export CHROMEDRIVER_BIN=/usr/local/bin/chromedriver
-
-  export MOZ_ENABLE_WAYLAND=0
   export MOZ_WEBRENDER=1
-  export MOZ_HEADLESS=1
-  export MOZ_DISABLE_CONTENT_SANDBOX=1
-  export MOZ_DISABLE_RDD_SANDBOX=1
-  export MOZ_DISABLE_GPU_SANDBOX=1
+  export MOZ_ENABLE_WAYLAND=0
   export QT_X11_NO_MITSHM=1
-
-  export BTK_API_PORT=8000
-  export BTK_PORT=8001
-  export BTK_FILE_PATH=/blobtoolkit/datasets
 
 %post
   bash -euxo pipefail <<'BASH'
-  export DEBIAN_FRONTEND=noninteractive
-  export TZ=Etc/UTC
+  export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC
 
-  # ------------------------------------------------------------
-  # Versions
-  # ------------------------------------------------------------
-  GECKO_VER=v0.36.0
-  BLOBTOOLKIT_BIN_RELEASE=4.5.0
-  BLOBTOOLKIT_BIN_PLATFORM=linux
-  VENV=/opt/venv
-
-  # ------------------------------------------------------------
-  # Base system dependencies
-  # ------------------------------------------------------------
-  apt-get update
-  apt-get upgrade -y
+  # ----- Base OS deps -----
+  apt-get update && apt-get -y upgrade
   apt-get install -y --no-install-recommends \
-      ca-certificates \
-      curl \
-      wget \
-      gnupg \
-      dirmngr \
-      gpg-agent \
-      unzip \
-      xz-utils \
-      locales \
-      procps \
-      build-essential \
-      pkg-config \
-      libffi-dev \
-      libssl-dev \
-      zlib1g-dev \
-      libbz2-dev \
-      liblzma-dev \
-      libreadline-dev \
-      libsqlite3-dev \
-      libncurses-dev \
-      libgdbm-dev \
-      tk-dev \
-      uuid-dev \
-      xvfb \
-      fonts-liberation \
-      libnss3 \
-      libatk1.0-0t64 \
-      libatk-bridge2.0-0t64 \
-      libx11-xcb1 \
-      libxss1 \
-      libxtst6 \
-      libxrandr2 \
-      libxkbcommon0 \
-      libgtk-3-0t64 \
-      libgbm1 \
-      libnotify4 \
-      libasound2t64 \
-      libdrm2 \
-      seqtk \
-      python3 \
-      python3-dev \
-      python-is-python3 \
-      python3-pip \
-      python3-venv
+      ca-certificates curl wget gnupg unzip bzip2 xz-utils jq \
+      build-essential pkg-config libffi-dev libssl-dev zlib1g-dev libbz2-dev liblzma-dev \
+      libreadline-dev libsqlite3-dev libncursesw5-dev libgdbm-dev tk-dev uuid-dev \
+      locales procps xvfb nano vim fonts-liberation \
+      libnss3 libatk1.0-0 libatk-bridge2.0-0 libx11-xcb1 libxss1 libxtst6 libxrandr2 libxkbcommon0 \
+      libgtk-3-0t64 libgbm1 libnotify4 libasound2t64 libdrm2
+  rm -rf /var/lib/apt/lists/*
 
-  # ------------------------------------------------------------
-  # Locale
-  # ------------------------------------------------------------
+  # ----- Locale -----
   sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen || true
   locale-gen en_US.UTF-8 || true
   update-ca-certificates || true
 
-  # ------------------------------------------------------------
-  # Python venv; BlobToolKit CLI + host support
-  #
-  # Do not use blobtoolkit[full] here. Current PyPI metadata can
-  # resolve to unavailable blobtoolkit-pipeline==4.4.6.
-  # ------------------------------------------------------------
-  python3 -m venv "$VENV"
+  # ----- Firefox from Mozilla official APT + geckodriver -----
+  GECKO_VER=v0.36.0
 
-  "$VENV/bin/python" -m pip install --no-cache-dir --upgrade pip wheel
-  "$VENV/bin/pip" install --no-cache-dir 'setuptools<81'
-  "$VENV/bin/pip" install --no-cache-dir 'blobtoolkit[host]==4.5.1' 'blobtoolkit-pipeline==4.5.1' --upgrade
-
-  test -x "$VENV/bin/blobtools"
-
-  ln -sf "$VENV/bin/python"    /usr/local/bin/python
-  ln -sf "$VENV/bin/python"    /usr/local/bin/python3
-  ln -sf "$VENV/bin/pip"       /usr/local/bin/pip
-  ln -sf "$VENV/bin/blobtools" /usr/local/bin/blobtools
-
-  # ------------------------------------------------------------
-  # Firefox from Mozilla official APT + geckodriver
-  # Includes fingerprint verification for Mozilla APT key.
-  # ------------------------------------------------------------
   install -d -m 0755 /etc/apt/keyrings
-
   wget -q https://packages.mozilla.org/apt/repo-signing-key.gpg -O- \
     | tee /etc/apt/keyrings/packages.mozilla.org.asc >/dev/null
-
   GNUPGHOME="$(mktemp -d)"
   chmod 700 "${GNUPGHOME}"
   gpg --batch --homedir "${GNUPGHOME}" -n -q --import --import-options import-show /etc/apt/keyrings/packages.mozilla.org.asc \
     | awk '/pub/{getline; gsub(/^ +| +$/,""); if($0 != "35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3") exit 1 }' \
     || { echo "Mozilla APT key fingerprint verification failed" >&2; exit 1; }
   rm -rf "${GNUPGHOME}"
-
   cat >/etc/apt/sources.list.d/mozilla.sources <<'SRC'
 Types: deb
 URIs: https://packages.mozilla.org/apt
@@ -224,7 +91,6 @@ Suites: mozilla
 Components: main
 Signed-By: /etc/apt/keyrings/packages.mozilla.org.asc
 SRC
-
   cat >/etc/apt/preferences.d/mozilla <<'PREF'
 Package: *
 Pin: origin packages.mozilla.org
@@ -233,216 +99,140 @@ PREF
 
   apt-get update
   apt-get install -y --no-install-recommends firefox
-
+  rm -rf /var/lib/apt/lists/*
   FIREFOX_REAL_BIN="$(
     command -v firefox 2>/dev/null \
       || command -v firefox-esr 2>/dev/null \
       || find /usr /opt -type f \( -name firefox -o -name firefox-bin -o -name firefox-esr \) -perm -111 2>/dev/null | head -n1
   )"
-
   [[ -n "${FIREFOX_REAL_BIN}" ]] || { echo "Firefox binary not found after Mozilla APT installation" >&2; exit 1; }
   ln -sfn "${FIREFOX_REAL_BIN}" /usr/local/bin/firefox
 
   cd /usr/local/bin
-  curl -fsSL -o geckodriver.tgz \
-    "https://github.com/mozilla/geckodriver/releases/download/${GECKO_VER}/geckodriver-${GECKO_VER}-linux64.tar.gz"
-  tar -xzf geckodriver.tgz
-  rm -f geckodriver.tgz
+  curl -fsSL -o geckodriver.tgz "https://github.com/mozilla/geckodriver/releases/download/${GECKO_VER}/geckodriver-${GECKO_VER}-linux64.tar.gz"
+  tar -xzf geckodriver.tgz && rm -f geckodriver.tgz
   chmod 0755 /usr/local/bin/geckodriver
 
-  # ------------------------------------------------------------
-  # Google Chrome Stable + matching Chromedriver
-  # Fallback for BlobToolKit when Firefox/Geckodriver fails.
-  # ------------------------------------------------------------
+  # ----- Google Chrome Stable + matching chromedriver -----
   install -d -m 0755 /etc/apt/keyrings
-
-  rm -f /etc/apt/keyrings/google-chrome.gpg
   curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
     | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
-
   cat >/etc/apt/sources.list.d/google-chrome.list <<'SRC'
 deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main
 SRC
 
   apt-get update
   apt-get install -y --no-install-recommends google-chrome-stable
-
   ln -sfn /usr/bin/google-chrome-stable /usr/local/bin/google-chrome
   ln -sfn /usr/bin/google-chrome-stable /usr/local/bin/chromium
   ln -sfn /usr/bin/google-chrome-stable /usr/local/bin/chromium-browser
+  rm -rf /var/lib/apt/lists/*
 
   CHROME_MAJOR="$(/usr/bin/google-chrome-stable --version | awk '{print $3}' | cut -d. -f1)"
   CHROMEDRIVER_VER="$(curl -fsSL "https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_${CHROME_MAJOR}")"
-
   cd /tmp
   curl -fsSL -o chromedriver.zip \
     "https://storage.googleapis.com/chrome-for-testing-public/${CHROMEDRIVER_VER}/linux64/chromedriver-linux64.zip"
-
   unzip -q chromedriver.zip
   install -m 0755 chromedriver-linux64/chromedriver /usr/local/bin/chromedriver
   rm -rf /tmp/chromedriver.zip /tmp/chromedriver-linux64
 
-  # ------------------------------------------------------------
-  # Standalone BlobToolKit API and Viewer binaries
-  # Required by local blobtools host/view.
-  # ------------------------------------------------------------
-  curl -fSL \
-      -o /usr/local/bin/blobtoolkit-api \
-      "https://github.com/blobtoolkit/blobtoolkit/releases/download/${BLOBTOOLKIT_BIN_RELEASE}/blobtoolkit-api-${BLOBTOOLKIT_BIN_PLATFORM}"
+  # ----- Build Python 3.9.21 from source -----
+  PYVER=3.9.21
+  cd /opt
+  curl -fsSL -o Python-${PYVER}.tgz https://www.python.org/ftp/python/${PYVER}/Python-${PYVER}.tgz
+  tar -xzf Python-${PYVER}.tgz && rm -f Python-${PYVER}.tgz
+  cd Python-${PYVER}
+  ./configure --prefix=/opt/python-${PYVER} --enable-optimizations --with-ensurepip=install
+  make -j"$(nproc)" && make install
+  ln -sf /opt/python-${PYVER}/bin/python3 /usr/local/bin/python3.9
 
-  curl -fSL \
-      -o /usr/local/bin/blobtoolkit-viewer \
-      "https://github.com/blobtoolkit/blobtoolkit/releases/download/${BLOBTOOLKIT_BIN_RELEASE}/blobtoolkit-viewer-${BLOBTOOLKIT_BIN_PLATFORM}"
+  # ----- Isolated venv (PEP 668 friendly) -----
+  /opt/python-${PYVER}/bin/python3 -m venv /opt/py39
+  /opt/py39/bin/python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
-  chmod 0755 /usr/local/bin/blobtoolkit-api
-  chmod 0755 /usr/local/bin/blobtoolkit-viewer
+  # ----- BlobToolKit CLI (pip) -----
+  # Silence pkg_resources deprecation noise by keeping setuptools<81 on Py3.9
+  /opt/py39/bin/pip install --no-cache-dir --upgrade pip wheel
+  /opt/py39/bin/pip install --no-cache-dir 'setuptools<81'
+  /opt/py39/bin/pip install --no-cache-dir 'blobtoolkit[full]' --upgrade
+  /opt/py39/bin/pip install --no-cache-dir 'chromedriver-sync' --upgrade
 
-  # ------------------------------------------------------------
-  # BlobToolKit Viewer/API config and launcher
-  # ------------------------------------------------------------
+  # Convenience symlinks
+  ln -sf /opt/py39/bin/blobtools /usr/local/bin/blobtools
+  ln -sf /opt/py39/bin/python   /usr/local/bin/python
+  ln -sf /opt/py39/bin/pip      /usr/local/bin/pip
+  ln -sf /opt/py39/bin/blobtools /usr/local/bin/blobtools
+  ln -sf /opt/py39/bin/python   /usr/local/bin/python
+  ln -sf /opt/py39/bin/pip      /usr/local/bin/pip
+
+  # ----- Install BlobToolKit API + Viewer binaries (from official releases) -----
+  # Use the "blobtoolkit/blobtoolkit" release page per wiki instructions
+  BTK_RELEASE=4.5.0
+  PLATFORM=linux
+  curl -fsSL -o /usr/local/bin/blobtoolkit-api \
+    "https://github.com/blobtoolkit/blobtoolkit/releases/download/${BTK_RELEASE}/blobtoolkit-api-${PLATFORM}"
+  curl -fsSL -o /usr/local/bin/blobtoolkit-viewer \
+    "https://github.com/blobtoolkit/blobtoolkit/releases/download/${BTK_RELEASE}/blobtoolkit-viewer-${PLATFORM}"
+  chmod 0755 /usr/local/bin/blobtoolkit-api /usr/local/bin/blobtoolkit-viewer
+
+  # ----- Bundle default Viewer/API config and launcher -----
+  # Ensure config dirs exist before writing files
   install -d -m 0755 /opt/blobtoolkit/conf /opt/blobtoolkit/bin /blobtoolkit/datasets /blobtoolkit/output
-
   cat >/opt/blobtoolkit/conf/.env <<'ENVEOF'
-# BlobToolKit Viewer/API defaults
-BTK_API_PORT=8000
-BTK_PORT=8001
-BTK_FILE_PATH=/blobtoolkit/datasets
+# ===== BlobToolKit Viewer/API defaults =====
+# Listener addresses (0.0.0.0 for containerised use)
+API_HOST=0.0.0.0
+API_PORT=8000
+VIEWER_HOST=0.0.0.0
+VIEWER_PORT=8080
+# Paths inside container
+DATASETS_DIR=/blobtoolkit/datasets
+OUTPUT_DIR=/blobtoolkit/output
+# Public URLs (used by viewer to reach API)
+PUBLIC_URL=http://localhost:${VIEWER_PORT}
+API_URL=http://localhost:${API_PORT}
 ENVEOF
 
   cat >/opt/blobtoolkit/bin/start-viewer-api <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-
-if [[ -f /opt/blobtoolkit/conf/.env ]]; then
-  set -a
-  source /opt/blobtoolkit/conf/.env
-  set +a
-fi
-
-: "${BTK_API_PORT:=8000}"
-: "${BTK_PORT:=8001}"
-: "${BTK_FILE_PATH:=/blobtoolkit/datasets}"
-
-if [[ ! -d "${BTK_FILE_PATH}" ]]; then
-  echo "[ERROR] BTK_FILE_PATH does not exist: ${BTK_FILE_PATH}" >&2
-  echo "[INFO] Bind the directory containing BlobDirs, for example:" >&2
-  echo "       singularity exec -B /path/to/blobtoolkit:/blobtoolkit/datasets image.sif start-viewer-api" >&2
-  exit 1
-fi
-
-echo "[INFO] Starting BlobToolKit API"
-echo "[INFO]   BTK_FILE_PATH=${BTK_FILE_PATH}"
-echo "[INFO]   BTK_API_PORT=${BTK_API_PORT}"
-echo "[INFO]   BTK_PORT=${BTK_PORT}"
-
-BTK_API_PORT="${BTK_API_PORT}" \
-BTK_PORT="${BTK_PORT}" \
-BTK_FILE_PATH="${BTK_FILE_PATH}" \
-blobtoolkit-api >/tmp/blobtoolkit-api.log 2>&1 &
-
-API_PID=$!
-
-sleep 3
-
-echo "[INFO] Starting BlobToolKit Viewer"
-echo "[INFO] Open: http://localhost:${BTK_PORT}/view/all"
-echo "[INFO] API log: /tmp/blobtoolkit-api.log"
-echo "[INFO] Viewer log: /tmp/blobtoolkit-viewer.log"
-
-BTK_API_PORT="${BTK_API_PORT}" \
-BTK_PORT="${BTK_PORT}" \
-blobtoolkit-viewer >/tmp/blobtoolkit-viewer.log 2>&1 &
-
-VIEWER_PID=$!
-
-trap 'kill ${API_PID} ${VIEWER_PID} 2>/dev/null || true' INT TERM EXIT
-
-wait
+source /opt/blobtoolkit/conf/.env
+export DATASETS_DIR OUTPUT_DIR API_URL PUBLIC_URL
+# Start API+Viewer using blobtools host (which discovers blobtoolkit-api/viewer on PATH)
+nohup blobtools host "${DATASETS_DIR}" --api-host "${API_HOST}" --api-port "${API_PORT}" \
+  --viewer-host "${VIEWER_HOST}" --viewer-port "${VIEWER_PORT}" >/tmp/btk_host.log 2>&1 &
+# Wait briefly and show status
+sleep 2
+echo "API:    http://localhost:${API_PORT}"
+echo "Viewer: http://localhost:${VIEWER_PORT}"
+echo "Logs:   /tmp/btk_host.log"
 SH
+  chmod +x /opt/blobtoolkit/bin/start-viewer-api
 
-  chmod 0755 /opt/blobtoolkit/bin/start-viewer-api
-  ln -sf /opt/blobtoolkit/bin/start-viewer-api /usr/local/bin/start-viewer-api
-
-  # ------------------------------------------------------------
   # Sanity checks
-  # Do not start blobtoolkit-api/blobtoolkit-viewer here:
-  # they are long-running services.
-  # ------------------------------------------------------------
-  command -v python
-  python --version
-
-  command -v pip
-  pip --version
-
-  command -v blobtools
-  blobtools --version
-  blobtools host --help >/dev/null || true
-  blobtools view --help >/dev/null || true
-
-  command -v blobtoolkit-api
-  test -x /usr/local/bin/blobtoolkit-api
-
-  command -v blobtoolkit-viewer
-  test -x /usr/local/bin/blobtoolkit-viewer
-
-  command -v start-viewer-api
-
-  command -v firefox
+  command -v firefox >/dev/null 2>&1
   firefox --version
-
-  command -v geckodriver
+  command -v geckodriver >/dev/null 2>&1
   geckodriver --version
-
-  command -v google-chrome
-  google-chrome --version
-
-  command -v chromium
-  chromium --version
-
-  command -v chromium-browser
-  chromium-browser --version
-
-  command -v chromedriver
+  command -v chromedriver >/dev/null 2>&1
   chromedriver --version
-
-  command -v xvfb-run
-
-  # Browser launch smoke tests. These test browser availability only,
-  # not BlobToolKit plotting.
-  xvfb-run -a firefox --headless --screenshot /tmp/firefox-test.png about:blank || true
-  xvfb-run -a google-chrome --headless=new --no-sandbox --disable-gpu --screenshot=/tmp/chrome-test.png about:blank || true
-
-  # ------------------------------------------------------------
-  # Cleanup
-  # Do not run "rm -rf /tmp/*" during Apptainer/Singularity builds.
-  # ------------------------------------------------------------
-  apt-get clean
-  rm -rf /var/lib/apt/lists/*
-  rm -rf /root/.cache/pip
-  rm -f /tmp/firefox-test.png /tmp/chrome-test.png
+  command -v /usr/bin/google-chrome-stable >/dev/null 2>&1
+  /usr/bin/google-chrome-stable --version
+  command -v google-chrome >/dev/null 2>&1
+  google-chrome --version
+  command -v chromium >/dev/null 2>&1
+  chromium --version
+  command -v chromium-browser >/dev/null 2>&1
+  chromium-browser --version
+  blobtools --version
+  command -v blobtoolkit-api >/dev/null 2>&1
+  command -v blobtoolkit-viewer >/dev/null 2>&1
 BASH
 
 %runscript
-  exec blobtools "$@"
+  # Default to showing blobtools help
+  exec /bin/bash -lc "source /environment >/dev/null 2>&1 || true; blobtools --help"
 
 %test
-  set -eu
-
-  python --version
-  pip --version
-
-  blobtools --version
-  blobtools host --help >/dev/null || true
-  blobtools view --help >/dev/null || true
-
-  command -v blobtoolkit-api
-  command -v blobtoolkit-viewer
-  command -v start-viewer-api
-
-  firefox --version
-  geckodriver --version
-
-  google-chrome --version
-  chromium --version
-  chromium-browser --version
-  chromedriver --version
+  bash -lc "python --version && blobtools --version && command -v firefox && firefox --version && command -v geckodriver && geckodriver --version && command -v /usr/bin/google-chrome-stable && /usr/bin/google-chrome-stable --version && command -v google-chrome && google-chrome --version && command -v chromedriver && chromedriver --version && command -v blobtoolkit-api && command -v blobtoolkit-viewer"

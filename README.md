@@ -1,4 +1,4 @@
-<img src="genoflowHiFi_badge.png" align="right" width="250"/>
+<img src="genoflowHiFi_badge.png" align="right" width="500"/>
 
 # genoflowHiFi
 

@@ -2,15 +2,44 @@
 *.tmp
 tmp.*/
 
+# Only the two approved root-level Bash workflows may be public. These rules
+# also protect future private Bash files from accidental staging.
+/*.sh
+!/genoflowHiFi_HiC_v0.1.0.sh
+!/functional_annotation_v2.sh
+/containers/*.sh
+repeatmasker_famdb_runtime_bind_patch.md
+
 01.hifiasm/
 02.fcs_decontam/
 03.deepvariant/
 04.inspector/
 05.scaffolding/
+05.yahs/
 06.final_asm/
+06.tgsgapcloser2/
 07.asm_stats/
+07.final_asm/
 08.repeats/
+08.asm_stats/
 09.summary/
+09.repeats/
+10.summary/
+
+00_logs/
+01_metadata/
+02_sra/
+03_fastq/
+04_fastp/
+05_multiqc/
+06_hisat2/
+07_featurecounts/
+08_eggnog_mapper/
+09_interproscan/
+10_diamond_annotation/
+11_kofamscan/
+12_dbcan/
+13_consensus_annotation/
 
 *.fq
 *.fq.gz

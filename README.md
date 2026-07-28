@@ -2,6 +2,8 @@
 
 # genoflowHiFi
 
+[![DOI](https://zenodo.org/badge/1238030344.svg)](https://doi.org/10.5281/zenodo.21650437)
+
 Reproducible Bash workflows for chromosome-level genome assembly and functional annotation.
 
 ## Public release scope
@@ -244,16 +246,27 @@ These checks do not replace validation on representative sequencing and annotati
 
 ## Citation and Zenodo
 
-Create a versioned GitHub release only after the public branch contains the intended release files and no private content in its reachable Git history. Enable the repository in Zenodo before creating the GitHub release. Zenodo will archive the release and assign a version DOI.
+The latest archived release is available through the
+[Zenodo concept DOI](https://doi.org/10.5281/zenodo.21650437). This DOI resolves
+to the most recent archived version.
 
-For a scientific publication, cite the version DOI for the exact archived release. Add the DOI badge and formatted citation here after Zenodo has created the record.
+For reproducible scientific citation, use the version-specific DOI associated
+with this release:
 
 ```text
-DOI: pending Zenodo release
-Citation: pending Zenodo metadata
+Version DOI: 10.5281/zenodo.21650438
+Concept DOI: 10.5281/zenodo.21650437
 ```
 
-The Zenodo DOI applies to the archived software release containing both public Bash workflows and their supporting files. Separate DOIs require separate Zenodo records.
+```text
+[AUTHORS]. (2026). genoflowHiFi: PacBio HiFi–Hi-C Genome Assembly and
+Functional Annotation Workflows (version 0.1.0). Zenodo.
+https://doi.org/10.5281/zenodo.21650438
+```
+
+The version DOI identifies the exact archived release used in an analysis. The
+concept DOI identifies the software project and resolves to its latest Zenodo
+version.
 
 ## License
 

@@ -4,7 +4,8 @@
 
 - Version: `0.1.0`
 - Release date: `2026-07-28`
-- Zenodo DOI: `[VERSION_DOI]`
+- Version DOI: <https://doi.org/10.5281/zenodo.21650438>
+- Concept DOI: <https://doi.org/10.5281/zenodo.21650437>
 
 ## Overview
 
@@ -130,7 +131,7 @@ Use the version-specific Zenodo DOI when citing the exact software release used
 in an analysis:
 
 ```text
-[AUTHORS]. ([YEAR]). genoflowHiFi: PacBio HiFi–Hi-C Genome Assembly and
-Functional Annotation Workflows ([RELEASE_VERSION]). Zenodo.
-https://doi.org/[VERSION_DOI]
+[AUTHORS]. (2026). genoflowHiFi: PacBio HiFi–Hi-C Genome Assembly and
+Functional Annotation Workflows (version 0.1.0). Zenodo.
+https://doi.org/10.5281/zenodo.21650438
 ```

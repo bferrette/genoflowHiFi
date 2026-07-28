@@ -3,7 +3,7 @@
 # genoflowHiFi
 
 <a href="https://doi.org/10.5281/zenodo.21650437">
-  <img src="https://zenodo.org/badge/DOI/10.5281/zenodo.21650438.svg" alt="Zenodo DOI: 10.5281/zenodo.21650438"/>
+  <img src="./zenodo_doi_badge.svg" alt="Zenodo DOI: 10.5281/zenodo.21650438"/>
 </a>
 
 Reproducible Bash workflows for chromosome-level genome assembly and functional annotation.

@@ -131,7 +131,7 @@ Use the version-specific Zenodo DOI when citing the exact software release used
 in an analysis:
 
 ```text
-[AUTHORS]. (2026). genoflowHiFi: PacBio HiFi–Hi-C Genome Assembly and
+Ferrette, B. L. S. (2026). genoflowHiFi: PacBio HiFi–Hi-C Genome Assembly and
 Functional Annotation Workflows (version 0.1.0). Zenodo.
 https://doi.org/10.5281/zenodo.21650438
 ```

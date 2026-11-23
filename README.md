@@ -6,14 +6,15 @@
   <img src="./zenodo_doi_badge.svg" alt="Zenodo DOI: 10.5281/zenodo.21650438"/>
 </a>
 
-Reproducible Bash workflows for chromosome-level genome assembly and functional annotation.
+Reproducible Bash workflows for PacBio HiFi genome assembly, optional Hi-C scaffolding, and functional annotation.
 
 ## Public release scope
 
-This repository releases exactly two Bash workflows:
+This repository releases three Bash workflows:
 
 | Script | Purpose |
 |---|---|
+| `genoflowHiFi_v0.9.14.sh` | PacBio HiFi assembly, long-read scaffolding, polishing, evaluation, repeat annotation, and reporting without requiring Hi-C |
 | `genoflowHiFi_HiC_v0.1.0.sh` | PacBio HiFi assembly with Hi-C scaffolding, manual curation, polishing, evaluation, repeat annotation, and reporting |
 | `functional_annotation_v2.sh` | RNA-seq processing, protein functional annotation, consensus tables, and descriptive expression and genome-annotation graphics |
 
@@ -21,7 +22,25 @@ Other development Bash workflows are not part of this public distribution.
 
 `functional_annotation_v2_R/` contains the three R helpers used by the public functional-annotation workflow. They are supporting source files, not additional Bash workflows.
 
-## 1. HiFi plus Hi-C genome assembly
+## 1. HiFi genome assembly
+
+`genoflowHiFi_v0.9.14.sh` assembles PacBio HiFi reads without requiring Hi-C data. Its default workflow runs Hifiasm, optional FCS decontamination, DeepVariant pre-polishing, Inspector correction, LongStitch scaffolding and candidate selection, final polishing and FCS cleanup, assembly evaluation, repeat annotation, and reporting. Scaffolding uses HiFi reads when optional PacBio CLR reads are not supplied. The script also exposes an optional Hifiasm Hi-C phasing mode (`HIFIASM_USE_HIC=TRUE`); leave it disabled for HiFi-only assembly.
+
+Review the project and software configuration near the top of the script before running it. The supplied paths and taxonomy are project-specific defaults, not portable settings. Configure the Miniforge environments, executables, containers, databases, taxonomy, resources, and enabled stages for the target system. The optional pre-converted HiFi FASTA has a project-specific default and must also be set to a valid local file when used.
+
+```bash
+working_dir="/path/to/project" \
+pacbio_hifi="/path/to/hifi_reads.fastq.gz" \
+pacbio_hifi_fasta="/path/to/hifi_reads.fasta.gz" \
+TAXID="13604" \
+BUSCO_LINEAGE="actinopterygii_odb12.2" \
+HIFIASM_USE_HIC=FALSE \
+bash genoflowHiFi_v0.9.14.sh
+```
+
+Stage switches include `run_hifiasm`, `run_fcs_early`, `run_deepvariant`, `run_inspector`, `run_scaffolding`, `run_final_asm`, `run_stats`, and `run_repeats`. Each defaults to `TRUE`; disabling a stage requires its downstream inputs to exist. The primary final assembly is `06.final_asm/<Scientific_Name>.fasta`; evaluation, repeats, and summaries are stored under `07.asm_stats/`, `08.repeats/`, and `09.summary/`.
+
+## 2. HiFi plus Hi-C genome assembly
 
 `genoflowHiFi_HiC_v0.1.0.sh` implements the following stages:
 
@@ -129,7 +148,7 @@ Important configuration variables are defined near the top of the script. Local 
 10.summary/         Final run summaries
 ```
 
-## 2. Functional annotation
+## 3. Functional annotation
 
 `functional_annotation_v2.sh` provides modular stages for:
 
@@ -203,15 +222,15 @@ Alternatively, set `R_SOURCE_DIR`, `FEATURECOUNTS_R_SOURCE`, `RNASEQ_R_SOURCE`, 
 
 ## Installation and dependencies
 
-Clone the repository and make the two public Bash workflows executable:
+Clone the repository and make the public Bash workflows executable:
 
 ```bash
 git clone https://github.com/bferrette/genoflowHiFi.git
 cd genoflowHiFi
-chmod 755 genoflowHiFi_HiC_v0.1.0.sh functional_annotation_v2.sh
+chmod 755 genoflowHiFi_v0.9.14.sh genoflowHiFi_HiC_v0.1.0.sh functional_annotation_v2.sh
 ```
 
-The workflows coordinate external software; they do not install it. Major assembly dependencies include Hifiasm, Chromap, YaHS, DeepVariant, Inspector, TGS-GapCloser2, QUAST, BUSCO, BlobToolKit, RepeatModeler2, TEtrimmer, RepeatMasker, Earl Grey, GNU Parallel, and Apptainer or Singularity.
+The workflows coordinate external software; they do not install it. Major assembly dependencies include Hifiasm, DeepVariant, Inspector, LongStitch (ntLink, ARKS, and optionally Tigmint), genoflowSTATS, yak, Merqury, Chromap, YaHS, TGS-GapCloser2, QUAST, BUSCO, BlobToolKit, RepeatModeler2, Terrier, TEtrimmer, RepeatMasker, Earl Grey, GNU Parallel, and Apptainer or Singularity. Dependencies vary with the workflow and enabled stages; the HiFi-only workflow requires a compatible genoflowSTATS installation in its configured environment for scaffolding and assessment.
 
 Major functional-annotation dependencies include SRA Toolkit, `fastp`, HISAT2, SAMtools, GNU Parallel, MultiQC, eggNOG-mapper, InterProScan, DIAMOND, KofamScan, dbCAN, mamba, and R with the packages declared in `R_REQUIRED_PACKAGES`.
 
@@ -225,6 +244,7 @@ TE-tools container builds. They do not install or build containers automatically
 Syntax validation:
 
 ```bash
+bash -n genoflowHiFi_v0.9.14.sh
 bash -n genoflowHiFi_HiC_v0.1.0.sh
 bash -n functional_annotation_v2.sh
 ```
@@ -232,6 +252,7 @@ bash -n functional_annotation_v2.sh
 Static analysis, when ShellCheck is installed:
 
 ```bash
+shellcheck -x genoflowHiFi_v0.9.14.sh
 shellcheck -x genoflowHiFi_HiC_v0.1.0.sh
 shellcheck -x functional_annotation_v2.sh
 ```
@@ -252,8 +273,9 @@ The latest archived release is available through the
 [Zenodo concept DOI](https://doi.org/10.5281/zenodo.21650437). This DOI resolves
 to the most recent archived version.
 
-For reproducible scientific citation, use the version-specific DOI associated
-with this release:
+For reproducible scientific citation of the archived 0.1.0 release, use its
+version-specific DOI. That archive predates the addition of the HiFi-only script;
+cite a future version-specific DOI once a new release containing it is archived.
 
 ```text
 Version DOI: 10.5281/zenodo.21650438

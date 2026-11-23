@@ -2,9 +2,10 @@
 *.tmp
 tmp.*/
 
-# Only the two approved root-level Bash workflows may be public. These rules
+# Only the approved root-level Bash workflows may be public. These rules
 # also protect future private Bash files from accidental staging.
 /*.sh
+!/genoflowHiFi_v0.9.14.sh
 !/genoflowHiFi_HiC_v0.1.0.sh
 !/functional_annotation_v2.sh
 !/install_miniforge3_envs.sh

@@ -6,6 +6,7 @@ The public repository may contain only these Bash workflows:
 
 ```text
 genoflowHiFi_HiC_v0.1.0.sh
+genoflowHiFi_v0.9.14.sh
 functional_annotation_v2.sh
 ```
 
@@ -23,6 +24,12 @@ Do not change the existing GitHub repository to public until its reachable
 history has been checked. This checkout has historical commits containing
 private Bash workflows. Removing those files in a later commit is insufficient:
 older commits remain downloadable.
+
+The current index also tracks `containers/containers_creation.sh` and
+`install_miniforge3_envs.sh`; the latter is deleted in the working tree but
+remains in the index. Historical commits include additional workflow scripts.
+The checks below must pass in the publication export or rewritten history;
+the current checkout does not satisfy them.
 
 Use one of these publication models:
 
@@ -44,6 +51,7 @@ README.md
 REPOSITORY_MAINTENANCE.md
 genoflowHiFi_badge.png
 genoflowHiFi_HiC_v0.1.0.sh
+genoflowHiFi_v0.9.14.sh
 functional_annotation_v2.sh
 functional_annotation_v2_R/egapx_genome_annotation_graphics_karyoploter.R
 functional_annotation_v2_R/rnaseq_single_sample_plots.R
@@ -61,8 +69,10 @@ published workflow contract.
 Run from the clean public export:
 
 ```bash
+bash -n genoflowHiFi_v0.9.14.sh
 bash -n genoflowHiFi_HiC_v0.1.0.sh
 bash -n functional_annotation_v2.sh
+shellcheck -x genoflowHiFi_v0.9.14.sh
 shellcheck -x genoflowHiFi_HiC_v0.1.0.sh
 shellcheck -x functional_annotation_v2.sh
 
@@ -83,6 +93,7 @@ Expected Bash files from both the index and all reachable history:
 ```text
 functional_annotation_v2.sh
 genoflowHiFi_HiC_v0.1.0.sh
+genoflowHiFi_v0.9.14.sh
 ```
 
 Verify file modes:
@@ -106,6 +117,6 @@ the release repository is part of the archived software record.
 6. Add the resulting version DOI to `README.md` and cite that version DOI in the
    scientific publication.
 
-A single repository release produces one software record covering both public
+A single repository release produces one software record covering all public
 workflows. Use separate Zenodo deposits if each script requires an independent
 DOI.
